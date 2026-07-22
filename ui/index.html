@@ -78,16 +78,17 @@
               <div class="boss-meta"><span>ENEMY VITALITY</span><strong id="bossHpText">—</strong></div>
               <div class="boss-bar"><i id="bossHpBar" style="width:0"></i><b id="bossShieldBar" style="width:0"></b></div>
               <div class="boss-sub"><span id="bossHpValue">Not loaded</span><span id="encounterTimer">00:00.0</span></div>
-              <div class="focus-widget" id="focusWidget" title="Inferred from network ownership; not authoritative hate" hidden><small>FOCUS?</small><strong>—</strong><em>—</em></div>
+              <div class="focus-widget" id="focusWidget" title="Inferred from boss activity; not authoritative hate"><small>BOSS TARGET?</small><strong>ACQUIRING</strong><em>waiting for evidence</em></div>
             </div>
             <div class="hero-control">
+              <span>COUNTING <b id="liveCombatScope">WAITING FOR BOSS</b></span>
               <span>RUN <b id="runNumber">—</b></span>
             </div>
           </div>
 
           <div class="metric-grid" id="metricGrid">
             <article class="metric-card accent-cyan">
-              <div class="metric-label"><span>LOCAL DPS</span><i title="Damage per second from this client's Ecliptica log">?</i></div>
+              <div class="metric-label"><span id="partyDpsLabel">LOCAL BOSS DPS</span><i title="Damage per second from this client's Ecliptica log">?</i></div>
               <strong id="partyDps">—</strong>
               <small id="partyDpsDetail"><b id="partyDpsDelta">Waiting</b> for log data</small>
               <div class="spark-bars" id="dpsSpark" aria-hidden="true"></div>
@@ -157,14 +158,14 @@
 
         <section class="app-view" data-page="runs" aria-labelledby="runsTitle">
           <div class="page-heading">
-            <div><span class="eyebrow">SESSION ARCHIVE</span><h1 id="runsTitle">Run history</h1><p>Every encounter, automatically grouped and ready for review.</p></div>
+            <div><span class="eyebrow">BOSS ARCHIVE</span><h1 id="runsTitle">Run history</h1><p>Boss-fight output is primary; pre-boss combat is measured separately and excluded.</p></div>
             <div class="heading-tools"><label class="search-field"><span aria-hidden="true">⌕</span><input id="runSearch" type="search" placeholder="Search player or encounter" aria-label="Search run history"></label><button class="ghost-button" id="exportRunsButton">Export CSV</button></div>
           </div>
           <div class="summary-strip" id="runSummaryStrip"></div>
           <div class="history-layout">
             <article class="panel run-list-panel">
               <div class="filter-row">
-                <div class="filter-chips" role="group" aria-label="Run close-marker filter"><button class="active" data-run-filter="all">All runs</button><button data-run-filter="closed">Close marker</button><button data-run-filter="ongoing">No close marker</button></div>
+                <div class="filter-chips" role="group" aria-label="Run archive-state filter"><button class="active" data-run-filter="all">All runs</button><button data-run-filter="closed">Archived</button><button data-run-filter="ongoing">Active</button></div>
                 <select id="runSort" aria-label="Sort run history"><option value="recent">Most recent</option><option value="dps">Highest DPS</option><option value="duration">Fastest</option></select>
               </div>
               <div id="runList" class="run-list"></div>
@@ -182,10 +183,11 @@
             <div class="versus-mark">VS</div>
             <label><span>COMPARISON RUN</span><select id="compareB"></select></label>
           </div>
+          <div class="scope-note" id="compareScopeNote">Boss-fight windows only · pre-boss combat excluded</div>
           <div class="compare-summary" id="compareSummary"></div>
           <div class="compare-layout">
             <article class="panel chart-panel">
-              <header class="panel-header"><div><span class="eyebrow">NORMALIZED OUTPUT</span><h2>Damage curve</h2></div><span class="unit-label">DPS / elapsed %</span></header>
+              <header class="panel-header"><div><span class="eyebrow">BOSS WINDOWS</span><h2>Boss damage curve</h2></div><span class="unit-label">BOSS DPS / elapsed %</span></header>
               <div class="chart-legend" id="compareLegend"></div>
               <div class="canvas-wrap compare-canvas"><canvas id="compareChart" role="img" aria-label="Damage curves for two selected runs"></canvas></div>
             </article>
@@ -202,9 +204,10 @@
 
         <section class="app-view" data-page="analysis" aria-labelledby="analysisTitle">
           <div class="page-heading analysis-heading">
-            <div><span class="eyebrow">POST-RUN LAB</span><h1 id="analysisTitle">Deep analysis</h1><p>Inspect players, attacks, enemy pressure, and mechanic uptime.</p></div>
+            <div><span class="eyebrow">POST-RUN LAB</span><h1 id="analysisTitle">Deep analysis</h1><p>Min-max boss fights independently from excluded pre-boss combat.</p></div>
             <div class="analysis-selectors">
               <label class="run-selector"><span>ANALYZING RUN</span><select id="analysisRunSelect"></select></label>
+              <label class="run-selector" id="analysisEncounterControl"><span>BOSS FIGHT</span><select id="analysisEncounterSelect"><option value="all-bosses">All boss fights</option></select></label>
               <label class="run-selector" id="analysisPlayerControl"><span>PLAYER LOG</span><select id="analysisPlayerSelect"></select></label>
             </div>
           </div>
@@ -262,7 +265,7 @@
                   <fieldset><legend>Accent</legend><div class="color-options" id="accentOptions"><button class="active" data-accent="cyan" style="--swatch:#54e6ff" aria-label="Cyan"></button><button data-accent="mint" style="--swatch:#65f2b8" aria-label="Mint"></button><button data-accent="violet" style="--swatch:#ad8cff" aria-label="Violet"></button><button data-accent="amber" style="--swatch:#ffc45c" aria-label="Amber"></button><button data-accent="rose" style="--swatch:#ff719a" aria-label="Rose"></button></div></fieldset>
                   <label class="bg-control"><span>Background <output id="overlayBgValue">78%</output></span><input type="range" id="overlayBg" min="0" max="100" value="78"></label>
                 </div>
-                <fieldset class="show-options"><legend>Visible data</legend><label><input type="checkbox" value="dps" checked><span></span>DPS</label><label><input type="checkbox" value="damage" checked><span></span>Total damage</label><label><input type="checkbox" value="incoming"><span></span>Incoming</label><label><input type="checkbox" value="encounter" checked><span></span>Encounter</label><label><input type="checkbox" value="hits" checked><span></span>Recent hits</label><label><input type="checkbox" value="focus" checked><span></span>Boss focus?</label></fieldset>
+                <fieldset class="show-options"><legend>Visible data</legend><label><input type="checkbox" value="dps" checked><span></span>Boss DPS</label><label><input type="checkbox" value="damage" checked><span></span>Boss damage</label><label><input type="checkbox" value="incoming"><span></span>Incoming</label><label><input type="checkbox" value="encounter" checked><span></span>Encounter</label><label><input type="checkbox" value="hits" checked><span></span>Recent hits</label><label><input type="checkbox" value="focus" checked><span></span>Boss target?</label></fieldset>
               </article>
 
               <article class="panel control-section output-section">
@@ -292,7 +295,7 @@
               </article>
 
               <aside class="capability-note">
-                <span aria-hidden="true">i</span><p><strong>Honest about the log.</strong> MINMAXXER can only report events Ecliptica writes to the VRChat log. Absorbs, positions, and effect ownership may be unavailable. “Focus?” is inferred from boss network ownership and is never an authoritative hate or threat reading.</p>
+                <span aria-hidden="true">i</span><p><strong>Honest about the log.</strong> MINMAXXER can only report events Ecliptica writes to the VRChat log. Absorbs, positions, and effect ownership may be unavailable. “Boss target?” combines boss activity and network-ownership evidence; it is useful for awareness but is not an authoritative hate table.</p>
               </aside>
             </div>
 

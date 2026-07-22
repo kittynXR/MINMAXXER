@@ -32,6 +32,7 @@
     runFilter: "all",
     partyMetric: "dps",
     analysisTab: "players",
+    analysisEncounterByRun: {},
     analysisPlayerByRun: {},
     eventLimit: 60,
     eventRate: 0,
@@ -41,7 +42,12 @@
     timers: [],
     charts: {},
     profileSaveTimer: null,
-    lastLiveAt: 0
+    lastLiveAt: 0,
+    archiveRefreshTimer: null,
+    archiveBootstrapRetryTimer: null,
+    archiveStreamPrimed: false,
+    archiveMeaningfulPrimed: false,
+    archiveOpenPrimed: false
   };
   const overlayHitMemory = new WeakMap();
 
@@ -84,7 +90,7 @@
       className: "Void Dancer",
       sourceFile: "output_log_demo.txt",
       encounter: { name: "Astral Sovereign", kind: "Boss", phase: "Phase 3 · Eclipse", duration, active: true, hpPercent: 27.4, hpCurrent: 8310000, hpMax: 30280000, shieldPercent: 9 },
-      focus: { player: "Mirai", entity: "Astral Sovereign", ageSeconds: 1.2, confidence: "inferred", sourceNote: "Inferred from current boss entity network ownership; not authoritative hate." },
+      focus: { player: "Mirai", entity: "Astral Sovereign", ageSeconds: 1.2, confidence: "likely", evidence: "boss_owner_plus_local_incoming", corroboratingHits: 2, corroboratedAt: new Date().toISOString(), sourceNote: "Exact boss ownership plus immediate local incoming damage; still not an authoritative hate table." },
       outgoing: { total: 73903000, strike: 52600000, nonStrike: 21303000, hits: 1831, biggestHit: 388420, dps: 184220, rolling5s: 216300, rolling15s: 196100, rolling30s: 188700 },
       incoming: { total: 3400000, hits: 94, biggestHit: 244100, dps: 8460, avoidablePercent: 14.2, bySource: [] },
       partyHps: 21790,
@@ -165,8 +171,26 @@
     return specs.map((r, idx) => {
       const factor = r[4] / live.outgoing.dps;
       const players = live.players.map((p, pidx) => ({ ...p, dps: Math.round(p.dps * factor * (1 + (pidx - 2) * .013 * (idx % 3 - 1))), damage: Math.round(p.damage * factor) }));
+      const preBossDuration = 48 + (idx % 4) * 7;
+      const preBossDamage = Math.round(r[5] * (.075 + (idx % 3) * .012));
+      const bossEncounter = {
+        id: `${r[0]}-boss-1`, name: r[1], stage: idx > 3 ? "Obsidian Meridian" : "Umbra Citadel · Depth 4", kind: "boss",
+        duration: r[3], duration_seconds: r[3], dps: r[4], totalDamage: r[5], hits: Math.round(1831 * factor), biggestHit: Math.round(388420 * factor),
+        outgoing: { total: r[5], dps: r[4], hits: Math.round(1831 * factor), biggest_hit: Math.round(388420 * factor) },
+        incoming: { total: Math.round(live.incoming.total * factor), damage_per_second: Math.round(live.incoming.dps * (.88 + (idx % 3) * .11)), by_source: [] },
+        incomingDps: Math.round(live.incoming.dps * (.88 + (idx % 3) * .11)), players, attacks: live.attacks, timeline: live.timeline,
+        endReason: r[2] === "closed" ? "boss_defeated" : "open", boundaryConfidence: r[2] === "closed" ? "explicit" : "open", completed: r[2] === "closed"
+      };
+      const preBossEncounter = {
+        id: `${r[0]}-pre-1`, name: "Approach combat", stage: bossEncounter.stage, kind: "pre_boss", duration: preBossDuration, duration_seconds: preBossDuration,
+        dps: preBossDamage / preBossDuration, totalDamage: preBossDamage, outgoing: { total: preBossDamage, dps: preBossDamage / preBossDuration },
+        incoming: { total: Math.round(preBossDamage * .08), damage_per_second: preBossDamage * .08 / preBossDuration }, endReason: "boss_started", boundaryConfidence: "structural", completed: true,
+        players: [], attacks: [], timeline: []
+      };
       return {
-        id: r[0], number: r[0], encounter: r[1], stage: idx > 3 ? "Obsidian Meridian" : "Umbra Citadel · Depth 4", result: r[2], duration: r[3], dps: r[4], totalDamage: r[5], critRate: r[6], when: r[7], hps: Math.round(live.partyHps * (.9 + (idx % 4) * .035)), incomingDps: Math.round(live.incoming.dps * (.88 + (idx % 3) * .11)), debuffUptime: 88.4 + (idx % 4) * 2.1, deaths: idx % 3 === 1 ? 1 : 0, players, attacks: live.attacks, timeline: live.timeline.map((point, i) => ({ ...point, total: point.total * factor * (1 + Math.sin(i * .2 + idx) * .06) }))
+        id: r[0], number: r[0], encounter: r[1], stage: idx > 3 ? "Obsidian Meridian" : "Umbra Citadel · Depth 4", result: r[2], duration: r[3], dps: r[4], totalDamage: r[5], critRate: r[6], when: r[7], hps: Math.round(live.partyHps * (.9 + (idx % 4) * .035)), incomingDps: Math.round(live.incoming.dps * (.88 + (idx % 3) * .11)), debuffUptime: 88.4 + (idx % 4) * 2.1, deaths: idx % 3 === 1 ? 1 : 0, players, attacks: live.attacks, timeline: live.timeline.map((point, i) => ({ ...point, total: point.total * factor * (1 + Math.sin(i * .2 + idx) * .06) })),
+        metricsScope: "boss", observedDuration: r[3] + preBossDuration, preBossDuration, preBossOutgoing: preBossEncounter.outgoing, preBossIncoming: preBossEncounter.incoming, bossCount: 1, encounters: [preBossEncounter, bossEncounter],
+        outgoing: bossEncounter.outgoing, incoming: bossEncounter.incoming, hits: bossEncounter.hits, biggestHit: bossEncounter.biggestHit
       };
     });
   }
@@ -221,7 +245,7 @@
       const timestamp = point.timestamp ?? point.occurred_at ?? null;
       const parsedTimestamp = timestamp ? Date.parse(timestamp) : NaN;
       if (firstTimestamp === null && Number.isFinite(parsedTimestamp)) firstTimestamp = parsedTimestamp;
-      const explicitTime = point.t ?? point.time ?? point.second ?? point.elapsed;
+      const explicitTime = point.elapsed_seconds ?? point.elapsedSeconds ?? point.t ?? point.time ?? point.second ?? point.elapsed;
       const elapsed = explicitTime === undefined || explicitTime === null
         ? Number.isFinite(parsedTimestamp) && firstTimestamp !== null ? Math.max(0, (parsedTimestamp - firstTimestamp) / 1000) : index
         : number(explicitTime, index);
@@ -330,7 +354,9 @@
       focus: src.focus ? {
         player: String(src.focus.player ?? src.focus.owner ?? "Unknown"), entity: String(src.focus.entity ?? encounterRaw.name ?? "Boss"),
         observedAt: src.focus.observed_at ?? src.focus.observedAt ?? null, ageSeconds: number(src.focus.age_seconds ?? src.focus.ageSeconds),
-        confidence: String(src.focus.confidence ?? "inferred"), sourceNote: String(src.focus.source_note ?? src.focus.sourceNote ?? "Inferred from network ownership; not authoritative hate.")
+        confidence: String(src.focus.confidence ?? "possible"), evidence: String(src.focus.evidence ?? "boss_network_ownership"),
+        corroboratingHits: number(src.focus.corroborating_hits ?? src.focus.corroboratingHits), corroboratedAt: src.focus.corroborated_at ?? src.focus.corroboratedAt ?? null,
+        sourceNote: String(src.focus.source_note ?? src.focus.sourceNote ?? "Inferred from network ownership; not authoritative hate.")
       } : null,
       outgoing: {
         ...fallback.outgoing, ...outgoingRaw, total: number(outgoingRaw.total, isRealSnapshot ? 0 : fallback.outgoing.total), dps: totalDps,
@@ -361,14 +387,49 @@
     return weight ? items.reduce((sum, item) => sum + number(item[valueKey]) * number(item[weightKey]), 0) / weight : 0;
   }
 
+  function normalizedEncounterKind(value) {
+    const kind = String(value ?? "").toLowerCase().replaceAll("-", "_").replaceAll(" ", "_");
+    if (kind.includes("pre") && kind.includes("boss")) return "pre_boss";
+    return kind.includes("boss") ? "boss" : kind || "pre_boss";
+  }
+
+  function normalizeEncounterStats(encounter, index, observed) {
+    const raw = encounter && typeof encounter === "object" ? encounter : { name: encounter };
+    const outgoing = raw.outgoing ?? {};
+    const incoming = raw.incoming ?? {};
+    const duration = number(raw.duration ?? raw.duration_seconds);
+    let playersRaw = raw.players ?? raw.combatants ?? [];
+    if (!Array.isArray(playersRaw)) playersRaw = Object.entries(playersRaw).map(([name, value]) => ({ name, ...(value || {}) }));
+    const players = playersRaw.map((player, playerIndex) => normalizePlayer(typeof player === "string" ? { player } : player, playerIndex, duration, observed));
+    const attacksRaw = Array.isArray(raw.attacks) ? raw.attacks : [];
+    const totalDamage = number(raw.totalDamage ?? raw.total_damage ?? outgoing.total);
+    const dps = number(raw.dps ?? outgoing.dps, duration ? totalDamage / duration : 0);
+    const incomingTotal = number(incoming.total ?? raw.incoming_damage);
+    const incomingDps = number(raw.incomingDps ?? raw.incoming_dps ?? incoming.damage_per_second ?? incoming.dps, duration ? incomingTotal / duration : 0);
+    const endReason = String(raw.endReason ?? raw.end_reason ?? (raw.completed ? "boss_summary" : "open")).toLowerCase();
+    const boundaryConfidence = String(raw.boundaryConfidence ?? raw.boundary_confidence ?? (endReason === "open" ? "open" : "structural")).toLowerCase();
+    return {
+      ...raw,
+      id: String(raw.id ?? raw.encounter_id ?? `encounter-${index + 1}`),
+      name: String(raw.name ?? raw.encounter ?? "Unnamed encounter"), stage: String(raw.stage ?? "Stage not logged"),
+      kind: normalizedEncounterKind(raw.kind ?? raw.encounter_kind), duration, duration_seconds: duration,
+      dps, totalDamage, hits: number(raw.hits ?? outgoing.hits), biggestHit: number(raw.biggestHit ?? raw.biggest_hit ?? outgoing.biggest_hit),
+      outgoing: { ...outgoing, total: totalDamage, dps, hits: number(raw.hits ?? outgoing.hits), biggest_hit: number(raw.biggest_hit ?? outgoing.biggest_hit) },
+      incoming: { ...incoming, total: incomingTotal, damage_per_second: incomingDps }, incomingDps,
+      players, attacks: attacksRaw.map((attack) => normalizeAttack(attack, duration)), timeline: normalizeTimeline(raw.timeline),
+      endReason, boundaryConfidence, completed: endReason !== "open"
+    };
+  }
+
   function normalizeRun(run, index, live) {
     const encounter = run.encounter && typeof run.encounter === "object" ? run.encounter : {};
     const duration = number(run.duration ?? run.duration_seconds ?? encounter.duration_seconds, live.encounter.duration);
     const runOutgoing = run.outgoing ?? {};
     const runIncoming = run.incoming ?? {};
     const encounterList = Array.isArray(run.encounters) ? run.encounters : [];
-    const encounterEntry = encounterList.at(-1);
-    const encounterFromList = typeof encounterEntry === "string" ? encounterEntry : encounterEntry?.name ?? encounterEntry?.encounter;
+    const normalizedEncounters = encounterList.map((item, encounterIndex) => normalizeEncounterStats(item, encounterIndex, live.observedPlayer));
+    const encounterEntry = [...normalizedEncounters].reverse().find((item) => item.kind === "boss") ?? normalizedEncounters.at(-1);
+    const encounterFromList = encounterEntry?.name ?? encounterEntry?.encounter;
     const stageList = Array.isArray(run.stages) ? run.stages : [];
     const stageEntry = stageList.at(-1);
     const stageFromList = typeof stageEntry === "string" ? stageEntry : stageEntry?.name ?? stageEntry?.stage;
@@ -378,18 +439,32 @@
     const normalizedPlayers = players.length ? players.map((player, playerIndex) => normalizePlayer(player, playerIndex, duration, live.observedPlayer)) : [];
     const runAttacks = Array.isArray(run.attacks) ? run.attacks : state.usingMock ? live.attacks : [];
     const runTimeline = Array.isArray(run.timeline) && run.timeline.length ? run.timeline : state.usingMock ? live.timeline : [];
+    const derivedPreBossDuration = normalizedEncounters.filter((item) => item.kind === "pre_boss").reduce((sum, item) => sum + item.duration, 0);
+    const preBossDuration = Math.max(number(run.pre_boss_duration_seconds ?? run.preBossDurationSeconds ?? run.pre_boss_duration ?? run.preBossDuration), derivedPreBossDuration);
+    const derivedBossCount = normalizedEncounters.filter((item) => item.kind === "boss").length;
+    const bossCount = Math.max(number(run.boss_count ?? run.bossCount), derivedBossCount);
+    const metricsScope = String(run.metrics_scope ?? run.metricsScope ?? "").trim() || (bossCount ? "boss" : "observed_combat");
+    const observedDuration = number(run.observed_duration_seconds ?? run.observedDurationSeconds ?? run.observed_duration ?? run.observedDuration) || duration + preBossDuration;
+    const preBossOutgoing = run.pre_boss_outgoing ?? run.preBossOutgoing ?? {};
+    const preBossIncoming = run.pre_boss_incoming ?? run.preBossIncoming ?? {};
+    const totalDamage = number(run.total_damage ?? (typeof run.damage === "number" ? run.damage : undefined) ?? runOutgoing.total);
+    const dps = number(run.dps ?? run.party_dps ?? runOutgoing.dps, duration ? totalDamage / duration : 0);
+    const incomingDps = number(run.incoming_dps ?? run.damage_taken_per_second ?? runIncoming.damage_per_second, duration ? number(runIncoming.total) / duration : 0);
     return {
       ...run,
       id: String(run.id ?? run.run_id ?? run.number ?? index + 1), number: String(run.number ?? run.id ?? run.run_id ?? index + 1),
       encounter: String(run.encounter_name ?? encounter.name ?? (typeof run.encounter === "string" ? run.encounter : encounterFromList ?? (state.usingMock ? live.encounter.name : "No encounter name logged"))),
       stage: String(run.stage ?? run.world ?? stageFromList ?? (state.usingMock ? live.stage : "No stage logged")), result: String(run.result ?? run.outcome ?? (run.completed === false ? "ongoing" : "closed")).toLowerCase(),
-      duration, dps: number(run.dps ?? run.party_dps ?? runOutgoing.dps), totalDamage: number(run.total_damage ?? (typeof run.damage === "number" ? run.damage : undefined) ?? runOutgoing.total), critRate: number(run.crit_rate ?? run.critical_rate),
-      hps: number(run.hps ?? run.party_hps, normalizedPlayers.reduce((sum, player) => sum + player.hps, 0)), hits: number(run.hits ?? runOutgoing.hits), biggestHit: number(run.biggest_hit ?? runOutgoing.biggest_hit), incomingDps: number(run.incoming_dps ?? run.damage_taken_per_second ?? runIncoming.damage_per_second), debuffUptime: number(run.debuff_uptime),
+      duration, dps, totalDamage, critRate: number(run.crit_rate ?? run.critical_rate),
+      hps: number(run.hps ?? run.party_hps, normalizedPlayers.reduce((sum, player) => sum + player.hps, 0)), hits: number(run.hits ?? runOutgoing.hits), biggestHit: number(run.biggest_hit ?? runOutgoing.biggest_hit), incomingDps, debuffUptime: number(run.debuff_uptime),
       sourceCount: number(run.source_count ?? run.sourceCount, normalizedPlayers.length ? 1 : 0),
       deaths: number(run.deaths ?? run.knockouts), when: String(run.when ?? run.started_at_label ?? formatDate(run.started_at ?? run.timestamp)),
       players: normalizedPlayers.length ? normalizedPlayers : state.usingMock ? live.players : [],
       attacks: runAttacks.map((attack) => normalizeAttack(attack, duration)),
-      timeline: normalizeTimeline(runTimeline)
+      timeline: normalizeTimeline(runTimeline), encounters: normalizedEncounters,
+      metricsScope, observedDuration, preBossDuration, preBossOutgoing, preBossIncoming, bossCount,
+      outgoing: { ...runOutgoing, total: totalDamage, dps, hits: number(run.hits ?? runOutgoing.hits), biggest_hit: number(run.biggest_hit ?? runOutgoing.biggest_hit) },
+      incoming: { ...runIncoming, total: number(runIncoming.total), damage_per_second: incomingDps }
     };
   }
 
@@ -456,10 +531,57 @@
 
   function tailPath(path) { return String(path).split(/[\\/]/).pop(); }
 
-  function connectStream(onLive) {
+  function isMeaningfulArchiveSnapshot(live) {
+    const source = String(live?.sourceFile ?? "").trim().toLowerCase();
+    return Boolean(live?.connected) && Boolean(source) && source !== "no active log file" && !source.includes("output_log_demo");
+  }
+
+  function archiveEncounterIdentity(live) {
+    const encounter = live?.encounter ?? {};
+    return [String(encounter.name ?? ""), String(encounter.kind ?? ""), String(encounter.started_at ?? encounter.startedAt ?? ""), String(encounter.phase ?? "")].join("|");
+  }
+
+  function archiveRefreshReason(previous, next, bootstrap = false) {
+    if (bootstrap) return "stream-bootstrap";
+    if (!previous || !next) return "";
+    const previousBossActive = Boolean(previous.encounter?.active) && normalizedEncounterKind(previous.encounter?.kind) === "boss";
+    const nextActive = Boolean(next.encounter?.active);
+    if (previousBossActive && !nextActive) return "boss-closed";
+    if (previous.encounter?.active && nextActive && archiveEncounterIdentity(previous) !== archiveEncounterIdentity(next)) return "encounter-boundary";
+    const previousSession = String(previous.sessionId ?? "");
+    const nextSession = String(next.sessionId ?? "");
+    if (previousSession !== nextSession && ((previousSession && previousSession !== "—") || (nextSession && nextSession !== "—"))) return "session-changed";
+    if (previous.connected && !next.connected) return "world-exit";
+    return "";
+  }
+
+  function scheduleArchiveRefresh() {
+    clearTimeout(state.archiveRefreshTimer);
+    state.archiveRefreshTimer = setTimeout(() => {
+      state.archiveRefreshTimer = null;
+      refreshRuns();
+    }, 500);
+  }
+
+  function scheduleArchiveBootstrapRetry() {
+    if (state.archiveBootstrapRetryTimer !== null) return;
+    state.archiveBootstrapRetryTimer = setTimeout(() => {
+      state.archiveBootstrapRetryTimer = null;
+      refreshRuns();
+    }, 4000);
+  }
+
+  function connectStream(onLive, { refreshArchive = false } = {}) {
     if (!("EventSource" in window)) return;
     const stream = new EventSource("/api/stream");
-    stream.addEventListener("open", () => { state.streamOnline = true; state.apiOnline = true; updateConnectionUI(); });
+    stream.addEventListener("open", () => {
+      state.streamOnline = true; state.apiOnline = true; updateConnectionUI();
+      if (refreshArchive && !state.archiveOpenPrimed) {
+        state.archiveOpenPrimed = true;
+        scheduleArchiveRefresh();
+        scheduleArchiveBootstrapRetry();
+      }
+    });
     stream.addEventListener("error", () => { state.streamOnline = false; updateConnectionUI(); });
     stream.addEventListener("message", (message) => {
       try {
@@ -472,12 +594,19 @@
           state.events.unshift(event);
           state.events = state.events.slice(0, 1000);
           if (state.live) state.live.recentEvents = [event, ...state.live.recentEvents].slice(0, 10);
-        } else if (kind.includes("run") && (kind.includes("end") || kind.includes("complete"))) {
-          refreshRuns();
+        } else if (refreshArchive && kind.includes("run") && (kind.includes("end") || kind.includes("complete"))) {
+          scheduleArchiveRefresh();
         } else {
           const leavingDemo = state.usingMock && data && typeof data === "object" && (data.version !== undefined || data.encounter !== undefined || data.players !== undefined);
-          if (leavingDemo) { state.usingMock = false; refreshRuns(); }
-          state.live = normalizeLive(data, state.live || makeMockLive());
+          if (leavingDemo) state.usingMock = false;
+          const previousLive = state.live;
+          const nextLive = normalizeLive(data, state.live || makeMockLive());
+          const firstStreamSnapshot = !state.archiveStreamPrimed;
+          if (firstStreamSnapshot) state.archiveStreamPrimed = true;
+          const firstMeaningful = !state.archiveMeaningfulPrimed && isMeaningfulArchiveSnapshot(nextLive);
+          if (firstMeaningful) state.archiveMeaningfulPrimed = true;
+          if (refreshArchive && archiveRefreshReason(previousLive, nextLive, firstStreamSnapshot || firstMeaningful)) scheduleArchiveRefresh();
+          state.live = nextLive;
           state.lastLiveAt = Date.now();
           updateConnectionUI();
         }
@@ -497,6 +626,7 @@
       const payload = await api("/api/runs");
       const raw = Array.isArray(payload) ? payload : payload.runs ?? payload.items ?? [];
       state.runs = raw.map((run, i) => normalizeRun(run, i, state.live));
+      if (!state.runs.some((run) => run.id === state.selectedRunId)) state.selectedRunId = state.runs[0]?.id ?? null;
       if (!document.hidden) { renderRuns(); populateRunSelects(); }
     } catch (_) { /* Current history stays visible. */ }
   }
@@ -535,6 +665,34 @@
     root.innerHTML = points.map((value) => `<i style="height:${clamp(value / max * 100, 7, 100).toFixed(1)}%"></i>`).join("");
   }
 
+  function liveCombatScope(live = state.live) {
+    const active = Boolean(live?.encounter?.active);
+    const boss = normalizedEncounterKind(live?.encounter?.kind) === "boss";
+    if (active && boss) return { key: "boss", label: "BOSS WINDOW", metric: "BOSS", excluded: false };
+    if (active) return { key: "pre-boss", label: "PRE-BOSS · EXCLUDED", metric: "PRE-BOSS", excluded: true };
+    return { key: "waiting", label: "WAITING FOR BOSS", metric: "BOSS", excluded: false };
+  }
+
+  function focusPresentation(live = state.live) {
+    const scope = liveCombatScope(live);
+    if (live?.focus && scope.key === "boss") {
+      const rawConfidence = String(live.focus.confidence || "possible").toLowerCase();
+      const confidence = ["likely", "possible", "aging", "stale"].includes(rawConfidence) ? rawConfidence : "possible";
+      const hits = number(live.focus.corroboratingHits ?? live.focus.corroborating_hits);
+      const evidence = String(live.focus.evidence || "boss_network_ownership").replaceAll("_", " ");
+      const corroboration = hits ? ` · ${formatNumber(hits)} corroborating hit${hits === 1 ? "" : "s"}` : "";
+      const corroborated = live.focus.corroboratedAt ?? live.focus.corroborated_at;
+      return {
+        player: live.focus.player || "ACQUIRING", confidence,
+        detail: `${number(live.focus.ageSeconds).toFixed(1)}s ago · ${confidence.toUpperCase()} PROXY`,
+        badge: confidence.toUpperCase(),
+        note: `${live.focus.sourceNote || "Inferred boss target; not authoritative hate."} Evidence: ${evidence}${corroboration}${corroborated ? ` · corroborated ${formatDate(corroborated)}` : ""}.`
+      };
+    }
+    if (scope.key === "boss") return { player: "ACQUIRING", confidence: "acquiring", detail: "watching boss activity · proxy", badge: "PROXY", note: "No target evidence has been observed yet." };
+    return { player: "NO ACTIVE BOSS", confidence: "idle", detail: scope.key === "pre-boss" ? "pre-boss combat excluded" : "waiting for boss", badge: "IDLE", note: "Target inference begins when a boss window is active." };
+  }
+
   function renderLive() {
     const live = state.live; if (!live) return;
     text("#encounterZone", `${live.stage || live.world}`);
@@ -546,14 +704,18 @@
     $("#bossHpBar").style.width = `${clamp(live.encounter.hpPercent, 0, 100)}%`;
     $("#bossShieldBar").style.width = `${clamp(live.encounter.shieldPercent, 0, 100)}%`;
     text("#runNumber", `#${String(state.runs[0]?.number ?? live.sessionId?.split("-").pop() ?? "LIVE").padStart(4, "0")}`);
+    const scope = liveCombatScope(live);
+    text("#liveCombatScope", scope.label);
+    $("#liveCombatScope")?.classList.toggle("excluded", scope.excluded);
+    text("#partyDpsLabel", `LOCAL ${scope.metric} DPS${scope.excluded ? " · EXCLUDED" : ""}`);
     const focus = $("#focusWidget");
     if (focus) {
-      focus.hidden = !live.focus;
-      if (live.focus) {
-        $("strong", focus).textContent = live.focus.player;
-        $("em", focus).textContent = `${live.focus.ageSeconds.toFixed(1)}s`;
-        focus.title = live.focus.sourceNote;
-      }
+      const presentation = focusPresentation(live);
+      $("strong", focus).textContent = presentation.player;
+      $("em", focus).textContent = presentation.detail;
+      focus.title = presentation.note;
+      focus.dataset.confidence = presentation.confidence;
+      focus.classList.toggle("idle", !live.focus || scope.key !== "boss");
     }
     text("#partyDps", formatCompact(live.outgoing.dps));
     if (state.usingMock) {
@@ -562,7 +724,7 @@
       $("#damageInDetail").innerHTML = `<b id="avoidableDamage">14.2%</b> demo avoidable`;
       $("#critDetail").innerHTML = `<b>${formatCompact(live.outgoing.strike,2)}</b> demo strike · ${formatCompact(live.outgoing.nonStrike,2)} non-strike`;
       $("#debuffDetail").innerHTML = `<b>2.8s</b> demo longest gap`;
-    } else $("#partyDpsDetail").innerHTML = live.outgoing.hits ? `<b>${formatNumber(live.outgoing.hits)}</b> outgoing hits logged` : `<b>0</b> outgoing hits logged`;
+    } else $("#partyDpsDetail").innerHTML = `${scope.excluded ? "<b>Excluded</b> from archived boss metrics · " : ""}${live.outgoing.hits ? `<b>${formatNumber(live.outgoing.hits)}</b> outgoing hits logged` : `<b>0</b> outgoing hits logged`}`;
     text("#partyHps", state.usingMock ? formatCompact(live.partyHps) : "N/A");
     text("#damageIn", formatCompact(live.incoming.dps));
     if (!state.usingMock) {
@@ -721,28 +883,42 @@
   }
 
   function renderRunSummary() {
-    const closed = state.runs.filter((run) => run.result === "closed");
-    const best = Math.max(...state.runs.map((run) => run.dps), 0);
-    const average = state.runs.length ? state.runs.reduce((sum, run) => sum + run.dps, 0) / state.runs.length : 0;
+    const bossRuns = state.runs.filter(isBossScoped);
+    const fallbackRuns = state.runs.filter((run) => !isBossScoped(run));
+    const best = Math.max(...bossRuns.map((run) => run.dps), 0);
+    const average = bossRuns.length ? bossRuns.reduce((sum, run) => sum + run.dps, 0) / bossRuns.length : 0;
+    const bossCount = bossRuns.reduce((sum, run) => sum + number(run.bossCount), 0);
+    const preBossSeconds = bossRuns.reduce((sum, run) => sum + number(run.preBossDuration), 0);
     $("#runSummaryStrip").innerHTML = [
-      ["Runs observed", state.runs.length, "Current local archive"], ["Close markers", closed.length, `${state.runs.length - closed.length} without a close marker`],
-      ["Best logged DPS", formatCompact(best), "Across imported observations"], ["Average logged DPS", formatCompact(average), "Across visible runs"]
+      ["Boss-scoped runs", bossRuns.length, `${fallbackRuns.length} observed-combat fallback${fallbackRuns.length === 1 ? "" : "s"}`], ["Boss fights indexed", bossCount, `${formatDuration(preBossSeconds)} pre-boss excluded`],
+      ["Best boss DPS", bossRuns.length ? formatCompact(best) : "—", "Fallbacks excluded"], ["Average boss DPS", bossRuns.length ? formatCompact(average) : "—", "Boss windows only"]
     ].map(([label, value, sub]) => `<div class="summary-item"><span>${label}</span><strong>${value}</strong><small>${sub}</small></div>`).join("");
   }
 
   function filteredRuns() {
     const query = $("#runSearch")?.value.trim().toLowerCase() || ""; const sort = $("#runSort")?.value || "recent";
     let runs = state.runs.filter((run) => (state.runFilter === "all" || run.result === state.runFilter) && (!query || `${run.encounter} ${run.stage} ${run.players.map((p) => p.name).join(" ")}`.toLowerCase().includes(query)));
-    if (sort === "dps") runs.sort((a, b) => b.dps - a.dps); else if (sort === "duration") runs.sort((a, b) => a.duration - b.duration);
+    if (sort === "dps") runs.sort((a, b) => Number(isBossScoped(b)) - Number(isBossScoped(a)) || b.dps - a.dps); else if (sort === "duration") runs.sort((a, b) => Number(isBossScoped(b)) - Number(isBossScoped(a)) || a.duration - b.duration);
     return runs;
   }
 
-  function runDpsLabel(run) { return number(run?.sourceCount ?? run?.source_count) > 1 ? "PARTY DPS" : "LOCAL DPS"; }
+  function isBossScoped(run) { return String(run?.metricsScope ?? run?.metrics_scope ?? "").toLowerCase() === "boss" && number(run?.bossCount ?? run?.boss_count) > 0; }
+  function runMetricLabels(run) {
+    const party = number(run?.sourceCount ?? run?.source_count) > 1;
+    return isBossScoped(run)
+      ? { scope: "boss", dps: `BOSS ${party ? "PARTY" : "LOCAL"} DPS`, damage: "BOSS DAMAGE", time: "BOSS TIME", short: "BOSS" }
+      : { scope: "observed", dps: `OBSERVED ${party ? "PARTY" : "LOCAL"} DPS`, damage: "OBSERVED DAMAGE", time: "OBSERVED TIME", short: "OBS" };
+  }
+  function runDpsLabel(run) { return runMetricLabels(run).dps; }
+  function preBossTotal(run, direction) {
+    const stats = direction === "incoming" ? run?.preBossIncoming : run?.preBossOutgoing;
+    return number(stats?.total ?? stats?.damage ?? stats);
+  }
 
   function renderRuns() {
     if (!$("#runList")) return;
     renderRunSummary(); const runs = filteredRuns();
-    $("#runList").innerHTML = runs.length ? runs.map((run) => `<button class="run-row ${run.id === state.selectedRunId ? "active" : ""}" data-run-id="${escapeHtml(run.id)}"><span class="run-result ${run.result}">${run.result === "closed" ? "END" : "OPEN"}</span><span class="run-name"><strong>${escapeHtml(run.encounter)}</strong><span>#${escapeHtml(run.number)} · ${escapeHtml(run.when)}</span></span><span class="run-stat"><span>${runDpsLabel(run)}</span><strong>${formatCompact(run.dps)}</strong></span><span class="run-stat"><span>DAMAGE</span><strong>${formatCompact(run.totalDamage, 2)}</strong></span><span class="run-arrow">›</span></button>`).join("") : `<div class="empty-state"><div><strong>No matching runs</strong><p>Try a different filter or import an earlier VRChat log.</p></div></div>`;
+    $("#runList").innerHTML = runs.length ? runs.map((run) => { const labels = runMetricLabels(run); const bossScoped = isBossScoped(run); return `<button class="run-row ${run.id === state.selectedRunId ? "active" : ""}" data-run-id="${escapeHtml(run.id)}"><span class="run-result ${run.result}">${run.result === "ongoing" ? "LIVE" : bossScoped ? `B${formatNumber(run.bossCount)}` : "OBS"}</span><span class="run-name"><strong>${escapeHtml(run.encounter)}</strong><span>#${escapeHtml(run.number)} · ${bossScoped ? `${formatDuration(run.preBossDuration)} pre-boss excluded` : "observed-combat fallback · no boss boundary"}</span></span><span class="run-stat"><span>${labels.dps}</span><strong>${formatCompact(run.dps)}</strong></span><span class="run-stat"><span>${labels.damage}</span><strong>${formatCompact(run.totalDamage, 2)}</strong></span><span class="run-stat"><span>${labels.time}</span><strong>${formatDuration(run.duration, true)}</strong></span><span class="run-arrow">›</span></button>`; }).join("") : `<div class="empty-state"><div><strong>No matching runs</strong><p>Try a different filter or import an earlier VRChat log.</p></div></div>`;
     $$(".run-row", $("#runList")).forEach((row) => row.addEventListener("click", () => selectRun(row.dataset.runId)));
     renderRunInspector();
   }
@@ -764,7 +940,8 @@
     const run = state.runs.find((item) => item.id === state.selectedRunId) ?? state.runs[0];
     if (!run) { root.innerHTML = `<div class="empty-state"><p>Select a run to inspect it.</p></div>`; return; }
     const top = [...run.players].sort((a, b) => b.dps - a.dps).slice(0, 5); const max = top[0]?.dps || 1;
-    root.innerHTML = `<div class="inspector-cover"><span class="result-badge ${run.result}">${run.result === "closed" ? "CLOSE MARKER OBSERVED" : "NO CLOSE MARKER"}</span><h2>${escapeHtml(run.encounter)}</h2><p>${escapeHtml(run.stage)} · Run #${escapeHtml(run.number)}</p></div><div class="inspector-body"><div class="inspector-metrics"><div class="inspector-metric"><span>OBSERVED</span><strong>${formatDuration(run.duration, true)}</strong></div><div class="inspector-metric"><span>${runDpsLabel(run)}</span><strong>${formatCompact(run.dps)}</strong></div><div class="inspector-metric"><span>HEALING</span><strong>${state.usingMock ? formatCompact(run.hps) : "N/A"}</strong></div><div class="inspector-metric"><span>DOWNED</span><strong>${state.usingMock ? formatNumber(run.deaths) : "N/A"}</strong></div></div><div class="inspector-section"><h3>${run.sourceCount > 1 ? "Player contribution" : "Observed player"}</h3>${top.map((p) => `<div class="mini-player" style="--player-color:${p.color};--width:${p.dps / max * 100}%"><span>${escapeHtml(p.name)}</span><b>${formatCompact(p.dps)}</b><i></i></div>`).join("")}</div><div class="inspector-actions"><button class="ghost-button" data-compare-run="${escapeHtml(run.id)}">Compare</button><button class="primary-button" data-analyze-run="${escapeHtml(run.id)}">Analyze run</button></div></div>`;
+    const labels = runMetricLabels(run), bossScoped = isBossScoped(run);
+    root.innerHTML = `<div class="inspector-cover"><span class="result-badge ${run.result}">${bossScoped ? "BOSS METRICS · PRE-BOSS EXCLUDED" : "OBSERVED COMBAT FALLBACK · NO BOSS BOUNDARY"}</span><h2>${escapeHtml(run.encounter)}</h2><p>${escapeHtml(run.stage)} · Run #${escapeHtml(run.number)} · ${bossScoped ? `${formatNumber(run.bossCount)} boss fight${run.bossCount === 1 ? "" : "s"}` : "partial import or no BossStarted event"}</p></div><div class="inspector-body"><div class="inspector-metrics"><div class="inspector-metric"><span>${labels.time}</span><strong>${formatDuration(run.duration, true)}</strong></div><div class="inspector-metric"><span>${labels.dps}</span><strong>${formatCompact(run.dps)}</strong></div><div class="inspector-metric"><span>${labels.damage}</span><strong>${formatCompact(run.totalDamage, 2)}</strong></div><div class="inspector-metric"><span>${bossScoped ? "PRE-BOSS EXCLUDED" : "BOSS FIGHTS"}</span><strong>${bossScoped ? formatDuration(run.preBossDuration, true) : "0"}</strong></div></div><div class="scope-note compact">${bossScoped ? `${formatCompact(preBossTotal(run, "outgoing"), 2)} pre-boss outgoing is retained separately and does not affect the boss DPS above.` : "No boss boundary was detected. These observed-combat values are excluded from boss rankings and must not be interpreted as boss performance."}</div><div class="inspector-section"><h3>${bossScoped ? run.sourceCount > 1 ? "Boss player contribution" : "Boss observed player" : run.sourceCount > 1 ? "Observed player contribution" : "Observed player"}</h3>${top.map((p) => `<div class="mini-player" style="--player-color:${p.color};--width:${p.dps / max * 100}%"><span>${escapeHtml(p.name)}</span><b>${formatCompact(p.dps)}</b><i></i></div>`).join("")}</div><div class="inspector-actions"><button class="ghost-button" data-compare-run="${escapeHtml(run.id)}">Compare</button><button class="primary-button" data-analyze-run="${escapeHtml(run.id)}">${bossScoped ? "Analyze bosses" : "Analyze fallback"}</button></div></div>`;
     $("[data-compare-run]", root)?.addEventListener("click", () => { $("#compareA").value = run.id; setPage("compare"); });
     $("[data-analyze-run]", root)?.addEventListener("click", () => { $("#analysisRunSelect").value = run.id; setPage("analysis"); });
   }
@@ -772,7 +949,7 @@
   function populateRunSelects() {
     ["#compareA", "#compareB", "#analysisRunSelect", "#eventRunSelect"].forEach((selector, selectorIndex) => {
       const select = $(selector); if (!select) return; const current = select.value;
-      select.innerHTML = state.runs.map((run) => `<option value="${escapeHtml(run.id)}">#${escapeHtml(run.number)} · ${escapeHtml(run.encounter)} · ${formatCompact(run.dps)}</option>`).join("");
+      select.innerHTML = state.runs.map((run) => `<option value="${escapeHtml(run.id)}">#${escapeHtml(run.number)} · ${escapeHtml(run.encounter)} · ${formatCompact(run.dps)} ${isBossScoped(run) ? "boss DPS" : "observed DPS fallback"}</option>`).join("");
       if (current && state.runs.some((run) => run.id === current)) select.value = current; else if (selectorIndex === 1 && state.runs[1]) select.value = state.runs[1].id; else if (state.selectedRunId) select.value = state.selectedRunId;
     });
   }
@@ -782,20 +959,32 @@
 
   function renderComparison() {
     if (!$("#compareSummary")) return; const [a, b] = getCompareRuns(); if (!a || !b) return;
-    const loggedDpsLabel = a.sourceCount > 1 && b.sourceCount > 1 ? "Party DPS" : a.sourceCount <= 1 && b.sourceCount <= 1 ? "Local DPS" : "Logged DPS";
-    const metrics = state.usingMock ? [
-      ["Party DPS", a.dps, b.dps, false, (v) => formatCompact(Math.abs(v)), false], ["Observed duration", a.duration, b.duration, false, (v) => `${Math.abs(v).toFixed(1)}s`, true],
-      ["Debuff uptime", a.debuffUptime, b.debuffUptime, false, (v) => `${Math.abs(v).toFixed(1)} pt`, false], ["Incoming DPS", a.incomingDps, b.incomingDps, true, (v) => formatCompact(Math.abs(v)), false]
-    ] : [
-      [loggedDpsLabel, a.dps, b.dps, false, (v) => formatCompact(Math.abs(v)), false], ["Observed duration", a.duration, b.duration, false, (v) => `${Math.abs(v).toFixed(1)}s`, true],
-      ["Total damage", a.totalDamage, b.totalDamage, false, (v) => formatCompact(Math.abs(v)), true], ["Incoming DPS", a.incomingDps, b.incomingDps, true, (v) => formatCompact(Math.abs(v)), false]
+    const bossA = isBossScoped(a), bossB = isBossScoped(b);
+    const comparisonScope = bossA && bossB ? "boss" : !bossA && !bossB ? "observed" : "mixed";
+    const partyLabel = a.sourceCount > 1 && b.sourceCount > 1 ? "party" : a.sourceCount <= 1 && b.sourceCount <= 1 ? "local" : "logged";
+    const prefix = comparisonScope === "boss" ? "Boss" : comparisonScope === "observed" ? "Observed" : "Mixed-scope";
+    text("#compareScopeNote", comparisonScope === "boss"
+      ? `Boss-fight windows only · ${formatDuration(a.preBossDuration)} / ${formatDuration(b.preBossDuration)} pre-boss combat excluded from runs A / B`
+      : comparisonScope === "observed"
+        ? "Observed-combat fallback comparison · neither run has a detected boss boundary · excluded from boss rankings"
+        : "Scope mismatch · one run is boss-only and the other is an observed-combat fallback · deltas are informational, not a boss comparison");
+    const chartPanel = $(".compare-layout .chart-panel", $('[data-page="compare"]'));
+    if (chartPanel) {
+      $(".eyebrow", chartPanel).textContent = comparisonScope === "boss" ? "BOSS WINDOWS" : comparisonScope === "observed" ? "OBSERVED FALLBACK WINDOWS" : "MIXED SCOPES";
+      $("h2", chartPanel).textContent = `${prefix} damage curve`;
+      $(".unit-label", chartPanel).textContent = `${prefix.toUpperCase()} DPS / elapsed %`;
+    }
+    const mixedNeutral = comparisonScope === "mixed";
+    const metrics = [
+      [`${prefix} ${partyLabel} DPS`, a.dps, b.dps, false, (v) => formatCompact(Math.abs(v)), mixedNeutral], [`${prefix} time`, a.duration, b.duration, false, (v) => `${Math.abs(v).toFixed(1)}s`, true],
+      [`${prefix} damage`, a.totalDamage, b.totalDamage, false, (v) => formatCompact(Math.abs(v)), true], [`${prefix} incoming DPS`, a.incomingDps, b.incomingDps, true, (v) => formatCompact(Math.abs(v)), mixedNeutral]
     ];
     $("#compareSummary").innerHTML = metrics.map(([label, av, bv, inverse, formatter, neutral]) => { const d = delta(av, bv, inverse); const direction = d.value >= 0 ? "Higher" : "Lower"; return `<div class="delta-card" style="--delta-color:${neutral ? "var(--cyan)" : d.good ? "var(--mint)" : "var(--rose)"}"><span>${label}</span><strong>${d.value >= 0 ? "+" : "−"}${formatter(d.value)}</strong><small>${neutral ? `${direction} in comparison` : `${d.good ? "Improved" : "Regressed"} in comparison`}</small></div>`; }).join("");
     $("#compareLegend").innerHTML = `<span><i style="--legend:#54e6ff"></i>#${escapeHtml(a.number)} ${escapeHtml(a.encounter)}</span><span><i style="--legend:#ad8cff"></i>#${escapeHtml(b.number)} ${escapeHtml(b.encounter)}</span>`;
-    const extraMetrics = state.usingMock ? [["Critical rate", a.critRate, b.critRate, false, (v) => `${Math.abs(v).toFixed(1)} pt`, false], ["Demo HPS", a.hps, b.hps, false, (v) => formatCompact(Math.abs(v)), false]] : [["Outgoing hits", a.hits, b.hits, false, (v) => formatNumber(Math.abs(v)), true], ["Largest hit", a.biggestHit, b.biggestHit, false, (v) => formatCompact(Math.abs(v)), true]];
-    $("#compareTable").innerHTML = metrics.concat(extraMetrics).map(([label, av, bv, inverse, formatter, neutral]) => { const d = delta(av, bv, inverse); return `<div class="metric-delta-row"><span>${label}</span><b>${label.includes("duration") ? formatDuration(bv, true) : label.includes("rate") || label.includes("uptime") ? formatPercent(bv) : formatCompact(bv)}</b><em class="${neutral ? "" : d.good ? "positive" : "negative"}">${d.value >= 0 ? "+" : "−"}${formatter(d.value)}</em></div>`; }).join("");
+    const extraMetrics = state.usingMock ? [["Critical rate", a.critRate, b.critRate, false, (v) => `${Math.abs(v).toFixed(1)} pt`, mixedNeutral], ["Demo HPS", a.hps, b.hps, false, (v) => formatCompact(Math.abs(v)), mixedNeutral]] : [[`${prefix} outgoing hits`, a.hits, b.hits, false, (v) => formatNumber(Math.abs(v)), true], [`Largest ${prefix.toLowerCase()} hit`, a.biggestHit, b.biggestHit, false, (v) => formatCompact(Math.abs(v)), true]];
+    $("#compareTable").innerHTML = metrics.concat(extraMetrics).map(([label, av, bv, inverse, formatter, neutral]) => { const d = delta(av, bv, inverse); const lower = label.toLowerCase(); return `<div class="metric-delta-row"><span>${label}</span><b>${lower.includes("time") || lower.includes("duration") ? formatDuration(bv, true) : lower.includes("rate") || lower.includes("uptime") ? formatPercent(bv) : formatCompact(bv)}</b><em class="${neutral ? "" : d.good ? "positive" : "negative"}">${d.value >= 0 ? "+" : "−"}${formatter(d.value)}</em></div>`; }).join("");
     const names = [...new Set([...a.players, ...b.players].map((p) => p.name))];
-    $("#playerDeltaBody").innerHTML = names.map((name) => { const pa = a.players.find((p) => p.name === name); const pb = b.players.find((p) => p.name === name); const av = pa?.dps || 0, bv = pb?.dps || 0, change = bv - av; return `<tr><td><div class="player-cell"><span class="player-avatar" style="--player-color:${pb?.color || pa?.color || COLORS[0]}">${escapeHtml(initials(name))}</span>${escapeHtml(name)}</div></td><td class="numeric">${formatCompact(av)}</td><td class="numeric">${formatCompact(bv)}</td><td class="numeric ${change >= 0 ? "positive" : "negative"}">${change >= 0 ? "+" : "−"}${formatCompact(Math.abs(change))}</td><td><div class="impact-track"><i style="--impact:${Math.min(48,Math.abs(change)/400)}%;--offset:${change < 0 ? "-" : ""}${Math.min(48,Math.abs(change)/400)}%;--impact-color:${change >= 0 ? "var(--mint)" : "var(--rose)"}"></i></div></td></tr>`; }).join("");
+    $("#playerDeltaBody").innerHTML = names.map((name) => { const pa = a.players.find((p) => p.name === name); const pb = b.players.find((p) => p.name === name); const av = pa?.dps || 0, bv = pb?.dps || 0, change = bv - av; return `<tr><td><div class="player-cell"><span class="player-avatar" style="--player-color:${pb?.color || pa?.color || COLORS[0]}">${escapeHtml(initials(name))}</span>${escapeHtml(name)}</div></td><td class="numeric">${formatCompact(av)}</td><td class="numeric">${formatCompact(bv)}</td><td class="numeric ${mixedNeutral ? "" : change >= 0 ? "positive" : "negative"}">${change >= 0 ? "+" : "−"}${formatCompact(Math.abs(change))}</td><td><div class="impact-track"><i style="--impact:${Math.min(48,Math.abs(change)/400)}%;--offset:${change < 0 ? "-" : ""}${Math.min(48,Math.abs(change)/400)}%;--impact-color:${mixedNeutral ? "var(--cyan)" : change >= 0 ? "var(--mint)" : "var(--rose)"}"></i></div></td></tr>`; }).join("");
     drawCompareChart();
   }
 
@@ -810,27 +999,65 @@
 
   function selectedAnalysisRun() { return state.runs.find((run) => run.id === $("#analysisRunSelect")?.value) ?? state.runs[0]; }
 
-  function populateAnalysisPlayerSelect(run) {
+  function bossEncounters(run) { return (run?.encounters || []).filter((encounter) => normalizedEncounterKind(encounter.kind) === "boss"); }
+
+  function populateAnalysisEncounterSelect(run) {
+    const select = $("#analysisEncounterSelect"); if (!select || !run) return;
+    const bosses = bossEncounters(run);
+    const remembered = state.analysisEncounterByRun[run.id] ?? "all-bosses";
+    select.innerHTML = isBossScoped(run)
+      ? `<option value="all-bosses">All boss fights · ${bosses.length || run.bossCount || 0}</option>${bosses.map((boss, index) => `<option value="${escapeHtml(boss.id)}">Boss ${index + 1} · ${escapeHtml(boss.name)} · ${formatDuration(boss.duration, true)}</option>`).join("")}`
+      : `<option value="all-bosses">Observed combat fallback · no boss boundary</option>`;
+    select.value = bosses.some((boss) => boss.id === remembered) ? remembered : "all-bosses";
+    state.analysisEncounterByRun[run.id] = select.value;
+  }
+
+  function selectedAnalysisContext(run) {
+    const selected = state.analysisEncounterByRun[run?.id] ?? $("#analysisEncounterSelect")?.value ?? "all-bosses";
+    const boss = bossEncounters(run).find((encounter) => encounter.id === selected);
+    return boss ? { ...boss, number: run.number, sourceCount: run.sourceCount, parentRun: run, metricsScope: "boss", bossCount: 1 } : run;
+  }
+
+  function analysisScopeLabel(run, context) {
+    if (!isBossScoped(run)) return `Observed combat fallback · ${formatDuration(run.duration, true)} captured · no BossStarted boundary · excluded from boss rankings`;
+    if (context !== run && context?.id) return `${context.name} · ${formatDuration(context.duration, true)} boss window · pre-boss excluded`;
+    return `All ${run.bossCount || bossEncounters(run).length} boss fight${(run.bossCount || bossEncounters(run).length) === 1 ? "" : "s"} · ${formatDuration(run.preBossDuration)} pre-boss excluded`;
+  }
+
+  function analysisMetricLabels(context) {
+    const boss = isBossScoped(context);
+    return boss
+      ? { boss, adjective: "boss", upper: "BOSS", dps: "BOSS DPS", damage: "BOSS DAMAGE", hits: "BOSS HITS", time: "BOSS TIME", selection: "selected boss window", events: "boss-window events" }
+      : { boss, adjective: "observed", upper: "OBSERVED", dps: "OBSERVED DPS", damage: "OBSERVED DAMAGE", hits: "OBSERVED HITS", time: "OBSERVED TIME", selection: "observed-combat fallback", events: "observed combat events · no boss boundary" };
+  }
+
+  function populateAnalysisPlayerSelect(run, context = run) {
     const control = $("#analysisPlayerControl"), select = $("#analysisPlayerSelect");
     if (!control || !select) return;
-    const players = [...(run?.players || [])].sort((a, b) => b.damage - a.damage);
+    const players = [...(context?.players || [])].sort((a, b) => b.damage - a.damage);
     control.hidden = state.analysisTab !== "players" || !players.length;
-    const remembered = run ? state.analysisPlayerByRun[run.id] : null;
+    const memoryKey = run ? `${run.id}:${context?.id ?? "all-bosses"}` : null;
+    const remembered = memoryKey ? state.analysisPlayerByRun[memoryKey] : null;
     const current = players.some((player) => player.name === remembered) ? remembered : players[0]?.name;
     select.innerHTML = players.map((player) => `<option value="${escapeHtml(player.name)}">${escapeHtml(player.name)} · ${escapeHtml(player.className || "Class not logged")}</option>`).join("");
     if (current) {
       select.value = current;
-      state.analysisPlayerByRun[run.id] = current;
+      state.analysisPlayerByRun[memoryKey] = current;
     }
   }
 
   function renderAnalysis() {
     const root = $("#analysisContent"); if (!root) return; const run = selectedAnalysisRun(); if (!run) return;
-    populateAnalysisPlayerSelect(run);
-    if (state.analysisTab === "players") renderPlayerAnalysis(root, run);
+    populateAnalysisEncounterSelect(run);
+    const encounterControl = $("#analysisEncounterControl");
+    if (encounterControl) encounterControl.hidden = state.analysisTab === "encounter";
+    const context = state.analysisTab === "encounter" ? run : selectedAnalysisContext(run);
+    populateAnalysisPlayerSelect(run, context);
+    if (state.analysisTab === "players") renderPlayerAnalysis(root, context);
     else if (state.analysisTab === "encounter") renderEncounterAnalysis(root, run);
-    else if (state.analysisTab === "attacks") renderAttackAnalysis(root, run);
-    else renderIncomingAnalysis(root, run);
+    else if (state.analysisTab === "attacks") renderAttackAnalysis(root, context);
+    else renderIncomingAnalysis(root, context);
+    root.insertAdjacentHTML("afterbegin", `<div class="scope-note analysis-scope"><strong>${isBossScoped(run) ? "BOSS-ONLY ANALYSIS" : "OBSERVED COMBAT FALLBACK"}</strong><span>${escapeHtml(analysisScopeLabel(run, context))}</span></div>`);
     root.insertAdjacentHTML("beforeend", recentHitsAnalysisMarkup());
   }
 
@@ -844,31 +1071,57 @@
     const player = run.players.find((candidate) => candidate.name === selectedName) ?? [...run.players].sort((a, b) => b.damage - a.damage)[0] ?? (state.usingMock ? state.live.players[0] : null);
     if (!player) { root.innerHTML = `<div class="panel empty-state"><div><strong>No attributed player data</strong><p>This run does not contain player-attributed events in the imported logs.</p></div></div>`; return; }
     const attacks = Array.isArray(player.attacks) ? [...player.attacks].sort((a, b) => b.damage - a.damage).slice(0, 7) : []; const maxAttack = Math.max(...attacks.map((a) => a.damage), 1);
+    const scope = analysisMetricLabels(run);
     if (!state.usingMock) {
-      root.innerHTML = `<div class="analysis-grid"><article class="panel"><div class="player-analysis-hero"><span class="large-avatar">${escapeHtml(initials(player.name))}</span><div><h2>${escapeHtml(player.name)} ${player.you ? '<span class="you-pill">YOU</span>' : ""}</h2><p>${escapeHtml(player.className)} · log-attributed events · Run #${escapeHtml(run.number)}</p></div><div class="analysis-score"><strong>${formatCompact(player.dps)}</strong><span>DAMAGE / SECOND</span></div></div><div class="analysis-metrics"><div class="analysis-metric"><span>TOTAL DAMAGE</span><strong>${formatCompact(player.damage,2)}</strong><small>${run.totalDamage ? formatPercent(player.damage/run.totalDamage*100) : "Not logged"} ${run.sourceCount > 1 ? "party share" : "of logged total"}</small></div><div class="analysis-metric"><span>OUTGOING HITS</span><strong>${formatNumber(player.hits)}</strong><small>Logged hit events</small></div><div class="analysis-metric"><span>COMBAT SPAN</span><strong>${formatPercent(player.active)}</strong><small>First-to-last combat event; not uptime</small></div><div class="analysis-metric"><span>LARGEST HIT</span><strong>${formatCompact(player.biggestHit)}</strong><small>${player.damage ? `${formatPercent(player.strike/player.damage*100)} strike share` : "Not logged"}</small></div></div><div class="breakdown-list">${attacks.length ? attacks.map((attack, index) => `<div class="breakdown-row"><span class="name"><strong>${escapeHtml(attack.name)}</strong><small>${formatNumber(attack.hits)} hits · largest ${formatCompact(attack.max)}</small></span><span class="breakdown-bar" style="--bar-color:${COLORS[index%COLORS.length]}"><i style="width:${attack.damage/maxAttack*100}%"></i></span><span class="breakdown-value">${formatCompact(attack.damage,2)}</span><span class="breakdown-share">${player.damage ? formatPercent(attack.damage/player.damage*100) : "—"}</span></div>`).join("") : `<div class="empty-state"><p>No per-player damage-category breakdown was logged for this run.</p></div>`}</div></article><article class="panel"><header class="panel-header"><div><span class="eyebrow">LOG COVERAGE</span><h2>What this view can prove</h2></div></header><div class="callout-list"><div class="callout" style="--callout:var(--mint)"><span>✓</span><div><strong>Damage and hit counts are direct</strong><small>Amounts above come from normalized Ecliptica log events.</small></div></div><div class="callout" style="--callout:var(--amber)"><span>—</span><div><strong>Rotation order is not logged</strong><small>Cooldown alignment and ability sequencing cannot be reconstructed.</small></div></div><div class="callout" style="--callout:var(--amber)"><span>—</span><div><strong>Critical hits are not logged</strong><small>Strike and non-strike are damage categories, not inferred criticals.</small></div></div></div></article></div>`;
+      root.innerHTML = `<div class="analysis-grid"><article class="panel"><div class="player-analysis-hero"><span class="large-avatar">${escapeHtml(initials(player.name))}</span><div><h2>${escapeHtml(player.name)} ${player.you ? '<span class="you-pill">YOU</span>' : ""}</h2><p>${escapeHtml(player.className)} · ${scope.events} · Run #${escapeHtml(run.number)}</p></div><div class="analysis-score"><strong>${formatCompact(player.dps)}</strong><span>${scope.dps}</span></div></div><div class="analysis-metrics"><div class="analysis-metric"><span>${scope.damage}</span><strong>${formatCompact(player.damage,2)}</strong><small>${run.totalDamage ? formatPercent(player.damage/run.totalDamage*100) : "Not logged"} ${run.sourceCount > 1 ? `${scope.adjective} party share` : `of ${scope.adjective} total`}</small></div><div class="analysis-metric"><span>${scope.hits}</span><strong>${formatNumber(player.hits)}</strong><small>Logged during ${scope.selection}</small></div><div class="analysis-metric"><span>${scope.upper} COMBAT SPAN</span><strong>${formatPercent(player.active)}</strong><small>First-to-last ${scope.adjective} event; not uptime</small></div><div class="analysis-metric"><span>LARGEST ${scope.upper} HIT</span><strong>${formatCompact(player.biggestHit)}</strong><small>${player.damage ? `${formatPercent(player.strike/player.damage*100)} strike share` : "Not logged"}</small></div></div><div class="breakdown-list">${attacks.length ? attacks.map((attack, index) => `<div class="breakdown-row"><span class="name"><strong>${escapeHtml(attack.name)}</strong><small>${formatNumber(attack.hits)} hits · largest ${formatCompact(attack.max)}</small></span><span class="breakdown-bar" style="--bar-color:${COLORS[index%COLORS.length]}"><i style="width:${attack.damage/maxAttack*100}%"></i></span><span class="breakdown-value">${formatCompact(attack.damage,2)}</span><span class="breakdown-share">${player.damage ? formatPercent(attack.damage/player.damage*100) : "—"}</span></div>`).join("") : `<div class="empty-state"><p>No per-player damage-category breakdown was logged for this ${scope.selection}.</p></div>`}</div></article><article class="panel"><header class="panel-header"><div><span class="eyebrow">LOG COVERAGE</span><h2>What this view can prove</h2></div></header><div class="callout-list"><div class="callout" style="--callout:var(--mint)"><span>✓</span><div><strong>${scope.boss ? "Boss damage and hit counts are direct" : "Observed damage and hit counts are direct"}</strong><small>${scope.boss ? "Pre-boss events are excluded from every amount above." : "No boss boundary was detected; these values are observed combat, not boss performance."}</small></div></div><div class="callout" style="--callout:var(--amber)"><span>—</span><div><strong>Rotation order is not logged</strong><small>Cooldown alignment and ability sequencing cannot be reconstructed.</small></div></div><div class="callout" style="--callout:var(--amber)"><span>—</span><div><strong>Critical hits are not logged</strong><small>Strike and non-strike are damage categories, not inferred criticals.</small></div></div></div></article></div>`;
       return;
     }
-    root.innerHTML = `<div class="analysis-grid"><article class="panel"><div class="player-analysis-hero"><span class="large-avatar">${escapeHtml(initials(player.name))}</span><div><h2>${escapeHtml(player.name)} ${player.you ? '<span class="you-pill">YOU</span>' : ""}</h2><p>${escapeHtml(player.className)} · ${escapeHtml(player.role)} · Run #${escapeHtml(run.number)}</p></div><div class="analysis-score"><strong>${formatCompact(player.dps)}</strong><span>DAMAGE / SECOND</span></div></div><div class="analysis-metrics"><div class="analysis-metric"><span>TOTAL DAMAGE</span><strong>${formatCompact(player.damage,2)}</strong><small>${formatPercent(player.damage/run.totalDamage*100)} party share</small></div><div class="analysis-metric"><span>CRITICAL RATE</span><strong>${formatPercent(player.crit)}</strong><small>Across landed hits</small></div><div class="analysis-metric"><span>ACTIVE TIME</span><strong>${formatPercent(player.active)}</strong><small>${formatDuration(run.duration*player.active/100)} effective</small></div><div class="analysis-metric"><span>DOWNTIME</span><strong>${(run.duration*(100-player.active)/100).toFixed(1)}s</strong><small>Movement + mechanics</small></div></div><div class="breakdown-list">${attacks.map((attack, index) => `<div class="breakdown-row"><span class="name"><strong>${escapeHtml(attack.name)}</strong><small>${formatNumber(attack.hits)} hits · ${formatPercent(attack.crit)} crit</small></span><span class="breakdown-bar" style="--bar-color:${COLORS[index%COLORS.length]}"><i style="width:${attack.damage/maxAttack*100}%"></i></span><span class="breakdown-value">${formatCompact(attack.damage,2)}</span><span class="breakdown-share">${formatPercent(attack.damage/player.damage*100)}</span></div>`).join("")}</div></article><article class="panel"><header class="panel-header"><div><span class="eyebrow">ROTATION QUALITY</span><h2>Priority uptime</h2></div></header><div class="uptime-ring" style="--value:${player.active}"><div><strong>${formatPercent(player.active)}</strong><span>ACTIVE TIME</span></div></div><div class="callout-list"><div class="callout" style="--callout:var(--mint)"><span>↑</span><div><strong>Strong burst alignment</strong><small>Peak output overlaps Solar Alignment in 5 of 6 windows.</small></div></div><div class="callout" style="--callout:var(--amber)"><span>!</span><div><strong>2.8 second debuff gap</strong><small>Eclipse Brand dropped shortly before the third burst.</small></div></div><div class="callout" style="--callout:var(--cyan)"><span>◇</span><div><strong>Movement loss is low</strong><small>Only ${(run.duration*(100-player.active)/100).toFixed(1)} seconds without logged actions.</small></div></div></div></article></div>`;
+    root.innerHTML = `<div class="analysis-grid"><article class="panel"><div class="player-analysis-hero"><span class="large-avatar">${escapeHtml(initials(player.name))}</span><div><h2>${escapeHtml(player.name)} ${player.you ? '<span class="you-pill">YOU</span>' : ""}</h2><p>${escapeHtml(player.className)} · ${escapeHtml(player.role)} · Run #${escapeHtml(run.number)}</p></div><div class="analysis-score"><strong>${formatCompact(player.dps)}</strong><span>${scope.dps}</span></div></div><div class="analysis-metrics"><div class="analysis-metric"><span>${scope.damage}</span><strong>${formatCompact(player.damage,2)}</strong><small>${formatPercent(player.damage/run.totalDamage*100)} ${scope.adjective} party share</small></div><div class="analysis-metric"><span>CRITICAL RATE</span><strong>${formatPercent(player.crit)}</strong><small>Across ${scope.adjective} hits</small></div><div class="analysis-metric"><span>${scope.upper} ACTIVE TIME</span><strong>${formatPercent(player.active)}</strong><small>${formatDuration(run.duration*player.active/100)} effective</small></div><div class="analysis-metric"><span>${scope.upper} DOWNTIME</span><strong>${(run.duration*(100-player.active)/100).toFixed(1)}s</strong><small>Movement + mechanics</small></div></div><div class="breakdown-list">${attacks.map((attack, index) => `<div class="breakdown-row"><span class="name"><strong>${escapeHtml(attack.name)}</strong><small>${formatNumber(attack.hits)} hits · ${formatPercent(attack.crit)} crit</small></span><span class="breakdown-bar" style="--bar-color:${COLORS[index%COLORS.length]}"><i style="width:${attack.damage/maxAttack*100}%"></i></span><span class="breakdown-value">${formatCompact(attack.damage,2)}</span><span class="breakdown-share">${formatPercent(attack.damage/player.damage*100)}</span></div>`).join("")}</div></article><article class="panel"><header class="panel-header"><div><span class="eyebrow">ROTATION QUALITY</span><h2>${scope.boss ? "Boss priority uptime" : "Observed activity"}</h2></div></header><div class="uptime-ring" style="--value:${player.active}"><div><strong>${formatPercent(player.active)}</strong><span>${scope.upper} ACTIVE TIME</span></div></div><div class="callout-list"><div class="callout" style="--callout:var(--mint)"><span>↑</span><div><strong>Strong burst alignment</strong><small>Peak output overlaps Solar Alignment in 5 of 6 windows.</small></div></div><div class="callout" style="--callout:var(--amber)"><span>!</span><div><strong>2.8 second debuff gap</strong><small>Eclipse Brand dropped shortly before the third burst.</small></div></div><div class="callout" style="--callout:var(--cyan)"><span>◇</span><div><strong>Movement loss is low</strong><small>Only ${(run.duration*(100-player.active)/100).toFixed(1)} seconds without logged actions.</small></div></div></div></article></div>`;
+  }
+
+  function endReasonPresentation(encounter) {
+    const labels = {
+      boss_defeated: ["Boss defeated", "explicit"], boss_summary: ["Boss summary", "explicit"], next_boss: ["Next boss began", "structural"],
+      boss_started: ["Boss began", "structural"], next_stage: ["Next stage began", "structural"], intermission: ["Intermission", "structural"],
+      lobby: ["Lobby return", "structural"], world_exit: ["World exit", "structural"], open: ["Still active", "open"]
+    };
+    const reason = String(encounter.endReason ?? encounter.end_reason ?? "open").toLowerCase();
+    const [label, fallbackConfidence] = labels[reason] ?? [reason.replaceAll("_", " ") || "Boundary observed", "structural"];
+    const confidence = String(encounter.boundaryConfidence ?? encounter.boundary_confidence ?? fallbackConfidence).toLowerCase();
+    return { label, confidence };
+  }
+
+  function encounterRows(encounters, kind) {
+    if (!encounters.length) return `<tr><td colspan="8"><div class="empty-state"><p>${kind === "boss" ? "No boss windows were detected in this run." : "No pre-boss combat was logged."}</p></div></td></tr>`;
+    return encounters.map((encounter) => {
+      const end = endReasonPresentation(encounter);
+      return `<tr><td>${escapeHtml(encounter.name || (kind === "boss" ? "Unnamed boss" : "Approach combat"))}</td><td>${escapeHtml(encounter.stage || "Not logged")}</td><td class="numeric">${formatDuration(encounter.duration ?? encounter.duration_seconds, true)}</td><td class="numeric">${formatCompact(encounter.outgoing?.total ?? encounter.totalDamage, 2)}</td><td class="numeric">${formatCompact(encounter.outgoing?.dps ?? encounter.dps)}</td><td class="numeric">${formatCompact(encounter.incoming?.total, 2)}</td><td><span class="boundary-badge ${end.confidence}">${escapeHtml(end.label)}</span></td><td><span class="confidence-label ${end.confidence}">${escapeHtml(end.confidence)}</span></td></tr>`;
+    }).join("");
   }
 
   function renderEncounterAnalysis(root, run) {
-    if (!state.usingMock) {
-      const encounters = Array.isArray(run.encounters) && run.encounters.length ? run.encounters : [{ name: run.encounter, stage: run.stage, duration_seconds: run.duration, outgoing: { total: run.totalDamage, dps: run.dps }, incoming: { total: run.incomingDps * run.duration, damage_per_second: run.incomingDps }, completed: run.result === "closed" }];
-      root.innerHTML = `<div class="analysis-grid"><article class="panel wide-panel"><header class="panel-header"><div><span class="eyebrow">OBSERVED ENCOUNTERS</span><h2>Backend-derived encounter summary</h2></div><span class="unit-label">${encounters.length} LOGGED</span></header><div class="data-table-wrap"><table class="data-table"><thead><tr><th>Encounter</th><th>Stage</th><th class="numeric">Observed</th><th class="numeric">Outgoing</th><th class="numeric">DPS</th><th class="numeric">Incoming</th><th>State</th></tr></thead><tbody>${encounters.map((encounter) => `<tr><td>${escapeHtml(encounter.name || "Unnamed encounter")}</td><td>${escapeHtml(encounter.stage || "Not logged")}</td><td class="numeric">${formatDuration(encounter.duration_seconds, true)}</td><td class="numeric">${formatCompact(encounter.outgoing?.total, 2)}</td><td class="numeric">${formatCompact(encounter.outgoing?.dps)}</td><td class="numeric">${formatCompact(encounter.incoming?.total, 2)}</td><td><span class="hit-kind ${encounter.completed ? "strike" : "non-strike"}">${encounter.completed ? "END MARKER" : "END NOT LOGGED"}</span></td></tr>`).join("")}</tbody></table></div></article><article class="panel"><header class="panel-header"><div><span class="eyebrow">LOGGED TOTALS</span><h2>Run observation</h2></div></header><div class="analysis-metrics" style="grid-template-columns:repeat(2,1fr)"><div class="analysis-metric"><span>OBSERVED TIME</span><strong>${formatDuration(run.duration,true)}</strong><small>Not a verified completion time</small></div><div class="analysis-metric"><span>OUTGOING HITS</span><strong>${formatNumber(run.hits)}</strong><small>Direct log count</small></div><div class="analysis-metric"><span>OUTGOING</span><strong>${formatCompact(run.totalDamage,2)}</strong><small>Direct log total</small></div><div class="analysis-metric"><span>INCOMING / SEC</span><strong>${formatCompact(run.incomingDps)}</strong><small>Direct log total / time</small></div></div></article><article class="panel"><header class="panel-header"><div><span class="eyebrow">NOT LOGGED</span><h2>Mechanic limitations</h2></div></header><div class="callout-list"><div class="callout" style="--callout:var(--amber)"><span>—</span><div><strong>No authoritative success / failure result</strong><small>Closed only means the observation window ended.</small></div></div><div class="callout" style="--callout:var(--amber)"><span>—</span><div><strong>No avoidability or mechanic score</strong><small>Positions, dodge success, and encounter scoring are not emitted.</small></div></div><div class="callout" style="--callout:var(--amber)"><span>—</span><div><strong>No inferred phase checkpoints</strong><small>Only phases explicitly present in parsed events may be shown.</small></div></div></div></article></div>`;
+    if (!isBossScoped(run)) {
+      const observedEncounters = Array.isArray(run.encounters) ? run.encounters : [];
+      root.innerHTML = `<div class="analysis-grid encounter-analysis"><article class="panel wide-panel encounter-group"><header class="panel-header"><div><span class="eyebrow">FALLBACK SCOPE</span><h2>Observed combat · no boss boundary</h2></div><span class="unit-label">NOT BOSS-RANKED</span></header><p class="section-explainer">This partial import contains combat, but no reliable BossStarted boundary. Nothing below is labeled boss or pre-boss, and this run is excluded from boss rankings.</p><div class="analysis-metrics"><div class="analysis-metric"><span>OBSERVED TIME</span><strong>${formatDuration(run.duration,true)}</strong><small>Fallback analysis denominator</small></div><div class="analysis-metric"><span>OBSERVED DAMAGE</span><strong>${formatCompact(run.totalDamage,2)}</strong><small>Not boss damage</small></div><div class="analysis-metric"><span>OBSERVED DPS</span><strong>${formatCompact(run.dps)}</strong><small>Not boss DPS</small></div><div class="analysis-metric"><span>OBSERVED SEGMENTS</span><strong>${formatNumber(observedEncounters.length)}</strong><small>No boss classification</small></div></div></article><article class="panel wide-panel"><header class="panel-header"><div><span class="eyebrow">WHY FALLBACK</span><h2>Boundary unavailable</h2></div></header><div class="callout-list"><div class="callout" style="--callout:var(--amber)"><span>—</span><div><strong>No BossStarted event was captured</strong><small>This can happen with a partial log import or when observation begins after the boss boundary.</small></div></div><div class="callout" style="--callout:var(--cyan)"><span>i</span><div><strong>Values remain inspectable</strong><small>Players, damage categories, and incoming tabs use observed-combat labels and never enter boss leaderboards.</small></div></div></div></article></div>`;
       return;
     }
-    const phases = [["Opening", 17, "#54e6ff"], ["Convergence", 24, "#ad8cff"], ["Starfall", 31, "#ffc45c"], ["Eclipse", 28, "#ff719a"]];
-    root.innerHTML = `<div class="analysis-grid"><article class="panel"><header class="panel-header"><div><span class="eyebrow">PHASE OUTPUT</span><h2>${escapeHtml(run.encounter)} timeline</h2></div><span class="unit-label">${formatDuration(run.duration,true)} TOTAL</span></header><div class="phase-list" style="margin-top:18px">${phases.map(([name, share, color], i) => `<div class="phase-row"><span>${name}</span><span class="phase-track" style="--phase-color:${color}"><i style="width:${share*2.6}%"></i></span><b>${formatCompact(run.dps*(.84+i*.09))}</b></div>`).join("")}</div><div class="callout-list"><div class="callout" style="--callout:var(--rose)"><span>!</span><div><strong>Highest incoming pressure: Starfall</strong><small>44% of all party damage taken landed in a 38 second window.</small></div></div><div class="callout" style="--callout:var(--mint)"><span>✓</span><div><strong>Clean Eclipse transition</strong><small>No deaths or missed priority effects during the final phase.</small></div></div></div></article><article class="panel"><header class="panel-header"><div><span class="eyebrow">DEMO SCORE</span><h2>Illustrative execution</h2></div></header><div class="uptime-ring" style="--value:${run.result === "closed" ? 91 : 62}"><div><strong>${run.result === "closed" ? "91" : "62"}</strong><span>DEMO / 100</span></div></div><div class="analysis-metrics" style="grid-template-columns:repeat(2,1fr)"><div class="analysis-metric"><span>DEMO AVOIDABLE HITS</span><strong>${run.result === "closed" ? "4" : "13"}</strong><small>Illustrative data</small></div><div class="analysis-metric"><span>DEMO PRIORITY UPTIME</span><strong>${formatPercent(run.debuffUptime)}</strong><small>Illustrative data</small></div></div></article><article class="panel wide-panel"><header class="panel-header"><div><span class="eyebrow">DEMO CHECKPOINTS</span><h2>Illustrative moments</h2></div></header><div class="data-table-wrap"><table class="data-table"><thead><tr><th>Time</th><th>Moment</th><th>Party response</th><th class="numeric">DPS</th><th>Assessment</th></tr></thead><tbody><tr><td class="rank-cell">00:18.4</td><td>Opening break</td><td>5 / 5 players aligned</td><td class="numeric">${formatCompact(run.dps*1.42)}</td><td><span class="positive">Demo</span></td></tr><tr><td class="rank-cell">02:46.1</td><td>Starfall barrage</td><td>2 avoidable hits</td><td class="numeric">${formatCompact(run.dps*.71)}</td><td><span style="color:var(--amber)">Demo</span></td></tr><tr><td class="rank-cell">05:11.7</td><td>Eclipse transition</td><td>Priority debuffs refreshed</td><td class="numeric">${formatCompact(run.dps*1.18)}</td><td><span class="positive">Demo</span></td></tr></tbody></table></div></article></div>`;
+    let encounters = Array.isArray(run.encounters) ? run.encounters : [];
+    if (!encounters.length && run.bossCount) encounters = [normalizeEncounterStats({ id: `${run.id}-boss-summary`, name: run.encounter, stage: run.stage, kind: "boss", duration_seconds: run.duration, outgoing: run.outgoing, incoming: run.incoming, end_reason: run.result === "ongoing" ? "open" : "boss_summary", boundary_confidence: run.result === "ongoing" ? "open" : "structural" }, 0, state.live?.observedPlayer)];
+    const bosses = encounters.filter((encounter) => normalizedEncounterKind(encounter.kind) === "boss");
+    const preBoss = encounters.filter((encounter) => normalizedEncounterKind(encounter.kind) === "pre_boss");
+    root.innerHTML = `<div class="analysis-grid encounter-analysis"><article class="panel wide-panel encounter-group boss-group"><header class="panel-header"><div><span class="eyebrow">MIN-MAX SCOPE</span><h2>Boss fights</h2></div><span class="unit-label">${bosses.length} BOSS WINDOW${bosses.length === 1 ? "" : "S"}</span></header><p class="section-explainer">Only these windows contribute to boss DPS, boss damage, player rankings, and comparisons.</p><div class="data-table-wrap"><table class="data-table"><thead><tr><th>Boss</th><th>Stage</th><th class="numeric">Boss time</th><th class="numeric">Boss damage</th><th class="numeric">Boss DPS</th><th class="numeric">Incoming</th><th>Window ended by</th><th>Boundary</th></tr></thead><tbody>${encounterRows(bosses, "boss")}</tbody></table></div></article><article class="panel wide-panel encounter-group preboss-group"><header class="panel-header"><div><span class="eyebrow">EXCLUDED SCOPE</span><h2>Pre-boss · excluded</h2></div><span class="unit-label">${formatDuration(run.preBossDuration, true)} EXCLUDED</span></header><p class="section-explainer">Trash mobs and approach combat remain available for auditing, but never dilute boss DPS.</p><div class="data-table-wrap"><table class="data-table"><thead><tr><th>Segment</th><th>Stage</th><th class="numeric">Excluded time</th><th class="numeric">Outgoing</th><th class="numeric">DPS</th><th class="numeric">Incoming</th><th>Segment ended by</th><th>Boundary</th></tr></thead><tbody>${encounterRows(preBoss, "pre_boss")}</tbody></table></div></article><article class="panel"><header class="panel-header"><div><span class="eyebrow">SCOPE TOTALS</span><h2>Boss vs. observed run</h2></div></header><div class="analysis-metrics" style="grid-template-columns:repeat(2,1fr)"><div class="analysis-metric"><span>BOSS TIME</span><strong>${formatDuration(run.duration,true)}</strong><small>Primary analysis denominator</small></div><div class="analysis-metric"><span>BOSS DAMAGE</span><strong>${formatCompact(run.totalDamage,2)}</strong><small>Primary outgoing total</small></div><div class="analysis-metric excluded"><span>PRE-BOSS TIME</span><strong>${formatDuration(run.preBossDuration,true)}</strong><small>Excluded from boss metrics</small></div><div class="analysis-metric excluded"><span>OBSERVED TIME</span><strong>${formatDuration(run.observedDuration,true)}</strong><small>Full visit wall-clock, including transitions</small></div></div></article><article class="panel"><header class="panel-header"><div><span class="eyebrow">BOUNDARY LOGIC</span><h2>How windows close</h2></div></header><div class="callout-list"><div class="callout" style="--callout:var(--mint)"><span>✓</span><div><strong>Explicit boss evidence</strong><small>Boss defeat and boss-summary lines provide the strongest endings.</small></div></div><div class="callout" style="--callout:var(--cyan)"><span>↦</span><div><strong>Structural endings are valid</strong><small>A next boss, stage, intermission, lobby, or world exit closes the prior window without needing a matching end marker.</small></div></div><div class="callout" style="--callout:var(--amber)"><span>●</span><div><strong>Open means currently accumulating</strong><small>It no longer implies that an alternating end marker was missed.</small></div></div></div></article></div>`;
   }
 
   function renderAttackAnalysis(root, run) {
-    const attacks = run.attacks.length ? run.attacks : state.usingMock ? state.live.attacks : [];
+    const attacks = run.attacks?.length ? run.attacks : state.usingMock ? state.live.attacks : [];
     const max = Math.max(...attacks.map((attack) => number(attack.damage)), 1);
     const hasSources = attacks.some((attack) => attack.sourceAvailable);
-    root.innerHTML = `<div class="analysis-grid"><article class="panel wide-panel"><header class="panel-header"><div><span class="eyebrow">OUTGOING DAMAGE</span><h2>Damage category breakdown</h2></div><span class="unit-label">${attacks.length} LOGGED CATEGORIES</span></header><div class="data-table-wrap"><table class="data-table"><thead><tr><th>#</th><th>Category</th>${hasSources ? "<th>Logged source</th>" : ""}<th class="numeric">Damage</th><th class="numeric">DPS</th><th class="numeric">Hits</th><th class="numeric">Critical</th><th class="numeric">Largest</th><th>Share</th></tr></thead><tbody>${attacks.map((attack,i)=>`<tr><td class="rank-cell">${String(i+1).padStart(2,"0")}</td><td>${escapeHtml(attack.name)}</td>${hasSources ? `<td>${attack.sourceAvailable ? escapeHtml(attack.source) : "—"}</td>` : ""}<td class="numeric">${formatCompact(attack.damage,2)}</td><td class="numeric">${formatCompact(attack.dps)}</td><td class="numeric">${formatNumber(attack.hits)}</td><td class="numeric">${attack.critAvailable ? formatPercent(attack.crit) : "N/A"}</td><td class="numeric">${formatCompact(attack.max)}</td><td class="share-cell"><div class="share-track" style="--player-color:${COLORS[i%COLORS.length]}"><i style="width:${attack.damage/max*100}%"></i></div><small>${run.totalDamage ? formatPercent(attack.damage/run.totalDamage*100) : "—"}</small></td></tr>`).join("")}</tbody></table></div>${attacks.length ? "" : `<div class="empty-state"><p>No run-wide damage-category breakdown was logged for this run.</p></div>`}${state.usingMock ? "" : `<div class="callout" style="--callout:var(--amber);margin-top:12px"><span>—</span><div><strong>Categories are not ability names</strong><small>These labels come from logged damage types; the log does not identify skills or rotation order.</small></div></div>`}</article></div>`;
+    const scope = analysisMetricLabels(run);
+    root.innerHTML = `<div class="analysis-grid"><article class="panel wide-panel"><header class="panel-header"><div><span class="eyebrow">${scope.upper} OUTGOING DAMAGE</span><h2>${scope.boss ? "Boss" : "Observed"} damage category breakdown</h2></div><span class="unit-label">${attacks.length} ${scope.upper} CATEGORIES</span></header><div class="data-table-wrap"><table class="data-table"><thead><tr><th>#</th><th>Category</th>${hasSources ? "<th>Logged source</th>" : ""}<th class="numeric">${scope.adjective} damage</th><th class="numeric">${scope.adjective} DPS</th><th class="numeric">${scope.adjective} hits</th><th class="numeric">Critical</th><th class="numeric">Largest</th><th>${scope.boss ? "Boss" : "Observed"} share</th></tr></thead><tbody>${attacks.map((attack,i)=>`<tr><td class="rank-cell">${String(i+1).padStart(2,"0")}</td><td>${escapeHtml(attack.name)}</td>${hasSources ? `<td>${attack.sourceAvailable ? escapeHtml(attack.source) : "—"}</td>` : ""}<td class="numeric">${formatCompact(attack.damage,2)}</td><td class="numeric">${formatCompact(attack.dps)}</td><td class="numeric">${formatNumber(attack.hits)}</td><td class="numeric">${attack.critAvailable ? formatPercent(attack.crit) : "N/A"}</td><td class="numeric">${formatCompact(attack.max)}</td><td class="share-cell"><div class="share-track" style="--player-color:${COLORS[i%COLORS.length]}"><i style="width:${attack.damage/max*100}%"></i></div><small>${run.totalDamage ? formatPercent(attack.damage/run.totalDamage*100) : "—"}</small></td></tr>`).join("")}</tbody></table></div>${attacks.length ? "" : `<div class="empty-state"><p>No damage-category breakdown was logged for this ${scope.selection}.</p></div>`}${state.usingMock ? "" : `<div class="callout" style="--callout:var(--amber);margin-top:12px"><span>—</span><div><strong>Categories are not ability names</strong><small>These ${scope.boss ? "boss-only" : "observed fallback"} labels come from logged damage types; the log does not identify skills or rotation order.</small></div></div>`}</article></div>`;
   }
 
   function renderIncomingAnalysis(root, run) {
+    const scope = analysisMetricLabels(run);
     const rawSources = run.incoming?.by_source ?? run.incoming?.bySource ?? null;
     let sources = Array.isArray(rawSources) ? rawSources : rawSources && typeof rawSources === "object" ? Object.entries(rawSources).map(([name, damage]) => ({ name: name || "(empty source)", source: name, rawSource: name, damage: number(damage), hits: 0 })) : [];
     sources = sources.map((source) => { const rawName = String(source.name ?? source.source ?? "Unknown"); return rawName.length ? source : { ...source, name: "(empty source)", rawSource: rawName }; });
@@ -877,7 +1130,7 @@
       { name: "Starfall Barrage", damage: 603100, hits: 24 }, { name: "Fractured Reality", damage: 421900, hits: 31 }, { name: "Event Horizon", damage: 286600, hits: 4, avoidable: true }
     ];
     const max = Math.max(...sources.map((source) => number(source.damage ?? source.total)),1); const incomingTotal = number(run.incoming?.total, run.incomingDps * run.duration);
-    root.innerHTML = `<div class="analysis-grid"><article class="panel"><header class="panel-header"><div><span class="eyebrow">ENEMY PRESSURE</span><h2>Incoming damage sources</h2></div><span class="unit-label">${formatCompact(run.incomingDps)} / SEC</span></header><div class="breakdown-list">${sources.length ? sources.map((source,i)=>{const damage=number(source.damage??source.total);return `<div class="breakdown-row"><span class="name"><strong>${escapeHtml(source.name??source.source??"Unknown")}</strong><small>${source.hits ? `${formatNumber(source.hits)} hits` : "Hit count not split by source"}${state.usingMock&&source.avoidable?" · demo avoidable":""}</small></span><span class="breakdown-bar" style="--bar-color:${state.usingMock&&source.avoidable?"var(--rose)":COLORS[i%COLORS.length]}"><i style="width:${damage/max*100}%"></i></span><span class="breakdown-value">${formatCompact(damage,2)}</span><span class="breakdown-share">${incomingTotal ? formatPercent(damage/incomingTotal*100) : "—"}</span></div>`}).join("") : `<div class="empty-state"><p>No incoming source breakdown was logged for this run.</p></div>`}</div>${state.usingMock ? "" : `<div class="callout" style="--callout:var(--amber);margin-top:12px"><span>—</span><div><strong>Avoidability is not logged</strong><small>Source totals do not imply that a hit could have been prevented.</small></div></div>`}</article><article class="panel"><header class="panel-header"><div><span class="eyebrow">TARGET LOAD</span><h2>Damage taken by player</h2></div></header><div class="callout-list">${run.players.length ? [...run.players].sort((a,b)=>(b.incoming||0)-(a.incoming||0)).map((player,i)=>`<div class="callout" style="--callout:${player.color}"><span>${i+1}</span><div><strong>${escapeHtml(player.name)} · ${formatCompact(player.incoming||player.incomingDps*run.duration,2)}</strong><small>${formatCompact(player.incomingDps||player.incoming/Math.max(run.duration,1))} incoming DPS · ${escapeHtml(player.className||"Class not logged")}</small></div></div>`).join("") : `<div class="empty-state"><p>No player-attributed incoming events were logged.</p></div>`}</div></article></div>`;
+    root.innerHTML = `<div class="analysis-grid"><article class="panel"><header class="panel-header"><div><span class="eyebrow">${scope.upper} PRESSURE</span><h2>${scope.boss ? "Boss" : "Observed"} incoming damage sources</h2></div><span class="unit-label">${formatCompact(run.incomingDps)} ${scope.upper} IN / SEC</span></header><div class="breakdown-list">${sources.length ? sources.map((source,i)=>{const damage=number(source.damage??source.total);return `<div class="breakdown-row"><span class="name"><strong>${escapeHtml(source.name??source.source??"Unknown")}</strong><small>${source.hits ? `${formatNumber(source.hits)} ${scope.adjective} hits` : "Hit count not split by source"}${state.usingMock&&source.avoidable?" · demo avoidable":""}</small></span><span class="breakdown-bar" style="--bar-color:${state.usingMock&&source.avoidable?"var(--rose)":COLORS[i%COLORS.length]}"><i style="width:${damage/max*100}%"></i></span><span class="breakdown-value">${formatCompact(damage,2)}</span><span class="breakdown-share">${incomingTotal ? formatPercent(damage/incomingTotal*100) : "—"}</span></div>`}).join("") : `<div class="empty-state"><p>No incoming source breakdown was logged for this ${scope.selection}.</p></div>`}</div>${state.usingMock ? "" : `<div class="callout" style="--callout:var(--amber);margin-top:12px"><span>—</span><div><strong>Avoidability is not logged</strong><small>${scope.boss ? "Boss" : "Observed fallback"} source totals do not imply that a hit could have been prevented.</small></div></div>`}</article><article class="panel"><header class="panel-header"><div><span class="eyebrow">${scope.upper} TARGET LOAD</span><h2>${scope.boss ? "Boss" : "Observed"} damage taken by player</h2></div></header><div class="callout-list">${run.players?.length ? [...run.players].sort((a,b)=>(b.incoming||0)-(a.incoming||0)).map((player,i)=>`<div class="callout" style="--callout:${player.color}"><span>${i+1}</span><div><strong>${escapeHtml(player.name)} · ${formatCompact(player.incoming||player.incomingDps*run.duration,2)}</strong><small>${formatCompact(player.incomingDps||player.incoming/Math.max(run.duration,1))} ${scope.adjective} incoming DPS · ${escapeHtml(player.className||"Class not logged")}</small></div></div>`).join("") : `<div class="empty-state"><p>No player-attributed ${scope.adjective} incoming events were logged.</p></div>`}</div></article></div>`;
   }
 
   async function loadEventsForRun() {
@@ -903,7 +1156,7 @@
   function overlayOptionsFromSearch(search = location.search) {
     const params = new URLSearchParams(search); const showRaw = params.get("show");
     const hitMode = ["hits", "recent_hits"].includes(params.get("mode"));
-    const parsedShow = showRaw ? showRaw.split(",").map((item) => item === "recent_hits" ? "hits" : item).filter((item) => ["dps", "damage", "incoming", "encounter", "hits", "focus"].includes(item)) : hitMode ? ["hits"] : ["dps", "damage", "encounter", "hits", "focus"];
+    const parsedShow = showRaw ? showRaw.split(",").map((item) => item === "recent_hits" ? "hits" : item).filter((item) => ["dps", "damage", "incoming", "encounter", "hits", "focus"].includes(item)) : hitMode ? ["hits", "focus"] : ["dps", "damage", "encounter", "hits", "focus"];
     const requestedLayout = params.get("layout") || (hitMode ? "hits" : "leaderboard");
     return {
       profile: ["broadcast", "minimal", "vr"].includes(params.get("profile")) ? params.get("profile") : "broadcast",
@@ -930,14 +1183,16 @@
     if (!metrics.length) metrics.push("dps");
     const players = [...live.players].sort((a, b) => metricValue(b, metrics[0], live.encounter.duration) - metricValue(a, metrics[0], live.encounter.duration)).slice(0, options.rows);
     const max = Math.max(...players.map((p) => metricValue(p, metrics[0], live.encounter.duration)), 1);
-    const metricLabel = { dps: "DPS", damage: "DAMAGE", incoming: "INCOMING" };
+    const scope = liveCombatScope(live);
+    const metricLabel = { dps: `${scope.metric} DPS`, damage: `${scope.metric} DAMAGE`, incoming: `${scope.metric} INCOMING` };
     const metricFormat = (_, value) => formatCompact(value);
     const totals = metrics.slice(0, options.layout === "ticker" ? 1 : 3);
     const hits = recentHits(live, options.hitRows || 4);
     const newestHitKey = hits[0] ? `${hits[0].id}|${hits[0].amount}|${hits[0].time}` : ""; const hitChanged = Boolean(newestHitKey && overlayHitMemory.get(root) !== newestHitKey); overlayHitMemory.set(root, newestHitKey);
-    const focus = options.show.includes("focus") && live.focus ? `<div class="overlay-focus" title="${escapeHtml(live.focus.sourceNote)}"><span>FOCUS?</span><strong>${escapeHtml(live.focus.player)}</strong><em>${live.focus.ageSeconds.toFixed(1)}s ago</em><i>INFERRED</i></div>` : "";
+    const focusState = focusPresentation(live);
+    const focus = options.show.includes("focus") ? `<div class="overlay-focus confidence-${escapeHtml(focusState.confidence)} ${live.focus && scope.key === "boss" ? "" : "idle"}" title="${escapeHtml(focusState.note)}"><span>BOSS TARGET?</span><strong>${escapeHtml(focusState.player)}</strong><em>${escapeHtml(focusState.detail)}</em><i>${escapeHtml(focusState.badge)}</i></div>` : "";
     const hitWidget = (options.show.includes("hits") || options.layout === "hits") ? `<section class="overlay-hit-widget" aria-label="Previous local outgoing hits"><header><span>PREVIOUS HITS</span><small>LOCAL OUTGOING · LIVE</small></header>${hits.length ? hits.map((hit,index)=>`<div class="overlay-hit-row ${index===0&&hitChanged?"newest":""}"><span class="hit-age">${hit.age<10?hit.age.toFixed(1):Math.round(hit.age)}s</span><span class="hit-action">${escapeHtml(hit.action)}</span><span class="hit-type ${hit.strike?"strike":"non-strike"}">${hit.strike?"STRIKE":"NON-STRIKE"}</span><strong>${formatNumber(hit.amount)}${hit.flags.includes("CRIT")?" ✦":""}</strong></div>`).join("") : `<div class="overlay-hit-empty">Waiting for outgoing damage…</div>`}</section>` : "";
-    root.innerHTML = `<section class="combat-overlay profile-${options.profile} layout-${options.layout} theme-${options.theme}" style="--overlay-accent:${accent[0]};--overlay-accent-rgb:${accent[1]};--overlay-opacity:${options.bg/100};--overlay-scale:${options.scale/100};--metric-count:${metrics.length};--total-cols:${Math.max(1,totals.length)}" aria-label="Live Ecliptica combat overlay"><header class="overlay-head"><div class="overlay-brand"><span class="overlay-logo">MX</span><div class="overlay-title"><strong>${escapeHtml(options.show.includes("encounter") ? live.encounter.name : options.layout === "hits" ? "PREVIOUS HITS" : "MINMAXXER")}</strong><span>${escapeHtml(options.show.includes("encounter") ? `${live.encounter.phase || live.stage} · ${live.world}` : "ECLIPTICA COMBAT")}</span></div></div><div class="overlay-timer"><strong>${formatDuration(displayDuration,true)}</strong><span>${live.encounter.active ? "● LIVE" : live.connected ? "OBSERVATION CLOSED" : "WAITING"}</span></div></header>${focus}<div class="overlay-totals">${totals.map((metric,i)=>`<div class="overlay-total ${i===0?"accent":""}"><span>LOCAL ${metricLabel[metric]}</span><strong>${metricFormat(metric,metric==="dps"?live.outgoing.dps:metric==="damage"?live.outgoing.total:live.incoming.dps)}</strong></div>`).join("")}</div><div class="overlay-roster"><div class="overlay-columns"><span>#</span><span>PLAYER</span>${metrics.map((metric)=>`<span>${metricLabel[metric]}</span>`).join("")}</div>${players.map((player,index)=>{const roleKey=player.role.toLowerCase();const rgb=hexToRgb(player.color);return `<div class="overlay-player" style="--share:${metricValue(player,metrics[0],live.encounter.duration)/max*100};--player-rgb:${rgb}"><span class="overlay-rank">${String(index+1).padStart(2,"0")}</span><span class="overlay-player-name"><strong>${escapeHtml(player.name)}${player.you?" · YOU":""}</strong><small style="color:${ROLE_COLORS[roleKey]||ROLE_COLORS.unknown}">${escapeHtml(player.className||player.role)}</small></span>${metrics.map((metric,metricIndex)=>`<span class="overlay-player-value ${metricIndex===0?"primary":""}"><strong>${metricFormat(metric,metricValue(player,metric,live.encounter.duration))}</strong><small>${metric === "dps" ? formatPercent(player.dps/Math.max(live.outgoing.dps,1)*100) : metricLabel[metric]}</small></span>`).join("")}</div>`}).join("")}</div>${hitWidget}<footer class="overlay-foot"><span class="live-dot"><i></i>${state.usingMock?"DEMO DATA":live.connected?"LOG CONNECTED":"WAITING FOR LOG"}</span><span>MINMAXXER // ${escapeHtml(live.stage)}</span></footer></section>`;
+    root.innerHTML = `<section class="combat-overlay profile-${options.profile} layout-${options.layout} theme-${options.theme}" style="--overlay-accent:${accent[0]};--overlay-accent-rgb:${accent[1]};--overlay-opacity:${options.bg/100};--overlay-scale:${options.scale/100};--metric-count:${metrics.length};--total-cols:${Math.max(1,totals.length)}" aria-label="Live Ecliptica combat overlay"><header class="overlay-head"><div class="overlay-brand"><span class="overlay-logo">MX</span><div class="overlay-title"><strong>${escapeHtml(options.show.includes("encounter") ? live.encounter.name : options.layout === "hits" ? "PREVIOUS HITS" : "MINMAXXER")}</strong><span>${escapeHtml(options.show.includes("encounter") ? `${live.encounter.phase || live.stage} · ${live.world}` : "ECLIPTICA COMBAT")}</span></div></div><div class="overlay-timer"><strong>${formatDuration(displayDuration,true)}</strong><span>${live.encounter.active ? `● ${scope.label}` : live.connected ? scope.label : "WAITING"}</span></div></header>${focus}<div class="overlay-totals">${totals.map((metric,i)=>`<div class="overlay-total ${i===0?"accent":""}"><span>LOCAL ${metricLabel[metric]}${scope.excluded ? " · EXCLUDED" : ""}</span><strong>${metricFormat(metric,metric==="dps"?live.outgoing.dps:metric==="damage"?live.outgoing.total:live.incoming.dps)}</strong></div>`).join("")}</div><div class="overlay-roster"><div class="overlay-columns"><span>#</span><span>PLAYER</span>${metrics.map((metric)=>`<span>${metricLabel[metric]}</span>`).join("")}</div>${players.map((player,index)=>{const roleKey=player.role.toLowerCase();const rgb=hexToRgb(player.color);return `<div class="overlay-player" style="--share:${metricValue(player,metrics[0],live.encounter.duration)/max*100};--player-rgb:${rgb}"><span class="overlay-rank">${String(index+1).padStart(2,"0")}</span><span class="overlay-player-name"><strong>${escapeHtml(player.name)}${player.you?" · YOU":""}</strong><small style="color:${ROLE_COLORS[roleKey]||ROLE_COLORS.unknown}">${escapeHtml(player.className||player.role)}</small></span>${metrics.map((metric,metricIndex)=>`<span class="overlay-player-value ${metricIndex===0?"primary":""}"><strong>${metricFormat(metric,metricValue(player,metric,live.encounter.duration))}</strong><small>${metric === "dps" ? formatPercent(player.dps/Math.max(live.outgoing.dps,1)*100) : metricLabel[metric]}</small></span>`).join("")}</div>`}).join("")}</div>${hitWidget}<footer class="overlay-foot"><span class="live-dot"><i></i>${state.usingMock?"DEMO DATA":live.connected?"LOG CONNECTED":"WAITING FOR LOG"}</span><span>${escapeHtml(scope.label)} // ${escapeHtml(live.stage)}</span></footer></section>`;
   }
 
   function hexToRgb(hex) { const value = String(hex).replace("#", ""); const parsed = parseInt(value.length === 3 ? value.split("").map((c) => c + c).join("") : value, 16); return `${(parsed >> 16) & 255},${(parsed >> 8) & 255},${parsed & 255}`; }
@@ -1067,7 +1322,7 @@
   }
 
   function exportRunsCsv() {
-    const rows = [["Run", "Encounter", "Observation state", "Observed seconds", "Logged DPS", "Imported player logs", "Total damage", "Outgoing hits", "Largest outgoing hit", "Incoming DPS"], ...filteredRuns().map((run) => [run.number, run.encounter, run.result, run.duration, run.dps, run.sourceCount, run.totalDamage, run.hits, run.biggestHit, run.incomingDps])];
+    const rows = [["Run", "Encounter", "Session state", "Metrics scope", "Imported player logs", "Boss fights", "Boss seconds", "Boss DPS", "Boss damage", "Boss outgoing hits", "Largest boss hit", "Boss incoming DPS", "Observed fallback seconds", "Observed fallback DPS", "Observed fallback damage", "Observed fallback outgoing hits", "Largest observed fallback hit", "Observed fallback incoming DPS", "Pre-boss excluded seconds", "Pre-boss outgoing excluded", "Pre-boss incoming excluded", "Total observed seconds"], ...filteredRuns().map((run) => { const boss = isBossScoped(run); return [run.number, run.encounter, run.result, run.metricsScope, run.sourceCount, boss ? run.bossCount : 0, boss ? run.duration : "", boss ? run.dps : "", boss ? run.totalDamage : "", boss ? run.hits : "", boss ? run.biggestHit : "", boss ? run.incomingDps : "", boss ? "" : run.duration, boss ? "" : run.dps, boss ? "" : run.totalDamage, boss ? "" : run.hits, boss ? "" : run.biggestHit, boss ? "" : run.incomingDps, boss ? run.preBossDuration : "", boss ? preBossTotal(run, "outgoing") : "", boss ? preBossTotal(run, "incoming") : "", run.observedDuration]; })];
     const csv = rows.map((row) => row.map((cell) => `"${String(cell).replaceAll('"', '""')}"`).join(",")).join("\n"); const url = URL.createObjectURL(new Blob([csv], { type: "text/csv" })); const link = document.createElement("a"); link.href = url; link.download = `minmaxxer-runs-${new Date().toISOString().slice(0,10)}.csv`; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
 
@@ -1105,7 +1360,8 @@
     $("#exportRunsButton")?.addEventListener("click", exportRunsCsv); $("#compareA")?.addEventListener("change", renderComparison); $("#compareB")?.addEventListener("change", renderComparison);
     $$("[data-analysis-tab]").forEach((button) => button.addEventListener("click", () => { state.analysisTab = button.dataset.analysisTab; $$("[data-analysis-tab]").forEach((b) => b.classList.toggle("active", b === button)); renderAnalysis(); }));
     $("#analysisRunSelect")?.addEventListener("change", renderAnalysis);
-    $("#analysisPlayerSelect")?.addEventListener("change", (event) => { const run = selectedAnalysisRun(); if (run) state.analysisPlayerByRun[run.id] = event.target.value; renderAnalysis(); });
+    $("#analysisEncounterSelect")?.addEventListener("change", (event) => { const run = selectedAnalysisRun(); if (run) state.analysisEncounterByRun[run.id] = event.target.value; renderAnalysis(); });
+    $("#analysisPlayerSelect")?.addEventListener("change", (event) => { const run = selectedAnalysisRun(); if (run) { const context = selectedAnalysisContext(run); state.analysisPlayerByRun[`${run.id}:${context?.id ?? "all-bosses"}`] = event.target.value; } renderAnalysis(); });
     $("#eventRunSelect")?.addEventListener("change", loadEventsForRun); $("#eventSearch")?.addEventListener("input", renderEvents); $("#eventTypeFilter")?.addEventListener("change", renderEvents); $("#strikeOnly")?.addEventListener("change", renderEvents);
     $("#loadMoreEvents")?.addEventListener("click", () => { state.eventLimit += 80; renderEvents(); }); $("#copyEventsButton")?.addEventListener("click", async () => { await copyText(visibleEvents().map((event) => `${event.time}\t${event.type}\t${event.source}\t${event.action}\t${event.target}\t${event.amount}`).join("\n")); showToast("Visible events copied as tab-separated text."); });
     $("#settingsButton")?.addEventListener("click", openSettings); ["#autoImportToggle", "#launchMinimizedToggle", "#minimizeTrayToggle"].forEach((selector) => $(selector)?.addEventListener("click", (event) => toggleSwitch(event.currentTarget))); $("#saveSettings")?.addEventListener("click", saveSettings);
@@ -1142,7 +1398,7 @@
   async function bootApp() {
     await loadInitialData(); applySavedStudioOptions(); hydrateVrControls(); bindMainEvents(); renderAll();
     const initialPage = new URLSearchParams(location.search).get("view") || "live"; setPage(initialPage, false);
-    connectStream(() => { if (document.hidden) return; renderLive(); if ($('[data-page="overlay"]').classList.contains("active")) renderStudioPreview(); });
+    connectStream(() => { if (document.hidden) return; renderLive(); if ($('[data-page="overlay"]').classList.contains("active")) renderStudioPreview(); }, { refreshArchive: true });
     startDemoClock(() => { if (document.hidden) return; renderLive(); if ($('[data-page="overlay"]').classList.contains("active")) renderStudioPreview(); });
     const desktop = Boolean(state.settings.desktop_overlay_enabled ?? state.settings.desktopOverlayEnabled ?? state.settings.desktop_overlay?.enabled); const vr = Boolean(state.settings.vr_overlay_enabled ?? state.settings.vrOverlayEnabled ?? state.settings.vr_overlay?.enabled); setSwitch($("#desktopOverlayToggle"), desktop); setSwitch($("#vrOverlayToggle"), vr);
     setSwitch($("#desktopHeadsetToggle"), Boolean(state.settings.desktop_overlay?.show_when_vr_active));

@@ -10,11 +10,11 @@ All application and HUD surfaces are dark-only. The Windows title bar, WebView p
 
 - Exact outgoing hit values for the player whose log is being watched, split into strike and non-strike damage.
 - A configurable, newest-first recent-hit feed for classes whose damage numbers are obscured by movement or VFX.
-- Encounter, rolling 5/15/30-second, stage, boss-phase, and full-run damage statistics.
+- Boss-window, encounter, rolling 5/15/30-second, stage, and run damage statistics. When boss telemetry exists, the primary historical DPS and totals cover boss fights only; pre-boss time and damage are reported separately.
 - Incoming damage totals, largest hit, and breakdown by the raw attack/source label present in the log.
 - Stage, class, boss/phase, session, roster, encounter timing, and raw event history.
 - Multi-player post-run reports after logs from the other players are imported. Matching Ecliptica session IDs are merged automatically.
-- An experimental `FOCUS?` signal when a boss-matching entity's VRChat network ownership moves to a player. It is deliberately labeled as inferred and expires quickly; network ownership is **not** an authoritative hate table.
+- An always-visible experimental `BOSS TARGET?` signal based on exact boss-entity VRChat network ownership, with confidence, evidence, and signal age. A matching incoming hit can corroborate the proxy, and the last candidate remains visible until the encounter boundary. Network ownership is **not** an authoritative hate table.
 
 Ecliptica's current logs do **not** expose other players' damage to one client, player/enemy HP, healing, shields, critical hits, blocks, misses, authoritative kills, or applied/removed buff and debuff state. MINMAXXER never invents those values. See [Log telemetry](docs/LOG_TELEMETRY.md) for the full capability matrix.
 
@@ -22,7 +22,7 @@ Ecliptica's current logs do **not** expose other players' damage to one client, 
 
 1. Start `minmaxxer.exe`. It automatically finds `%USERPROFILE%\AppData\LocalLow\VRChat\VRChat` and imports recent logs.
 2. Start VRChat normally. The live display updates as Ecliptica writes complete log lines.
-3. Open **Overlay studio** to choose the compact HUD layout, colors, scale, visible rows, recent-hit count, and optional `FOCUS?` item.
+3. Open **Overlay studio** to choose the compact HUD layout, colors, scale, visible rows, recent-hit count, and `BOSS TARGET?` item.
 
 The portable release executable statically links the Visual C++ runtime. Its only desktop UI prerequisite is the Microsoft Edge WebView2 runtime included with current Windows 10/11 installations. SteamVR is only initialized when its overlay is enabled. Published builds are currently unsigned, so Windows SmartScreen may ask for confirmation on first launch.
 
@@ -58,6 +58,8 @@ Each player runs MINMAXXER during the run, or sends their `output_log_*.txt` aft
 
 Do not interpret roster names or network ownership as damage attribution. Ecliptica does not place the remote attacker on damage lines.
 
+Historical run analysis prioritizes optimization time: if a run contains boss-start telemetry, its primary duration, DPS, damage, attacks, and player totals include only the boss windows. Pre-boss combat remains available as a separate subtotal instead of being blended into boss performance. A boss window ends at the first reliable boundary, preferring a matching named boss-death or personal-summary record, then a following boss start, intermission, lobby, world exit, or stage transition. The analyzer falls back to the observed combat span only when no boss windows are present.
+
 ## Data and settings
 
 Local files are stored under `%LOCALAPPDATA%\MINMAXXER`:
@@ -78,6 +80,6 @@ cargo build --release -p minmaxxer
 ./scripts/build-portable.ps1
 ```
 
-The normal executable is written to `target\release\minmaxxer.exe`. The portable release script uses a clean isolated target, statically links the MSVC runtime, strips local build paths, and writes `dist\MINMAXXER-v0.1.0-windows-x64.exe`. Run the local server without the desktop WebView with `minmaxxer.exe --headless`.
+The normal executable is written to `target\release\minmaxxer.exe`. The portable release script uses a clean isolated target, statically links the MSVC runtime, strips local build paths, and writes `dist\MINMAXXER-v0.2.0-windows-x64.exe`. Run the local server without the desktop WebView with `minmaxxer.exe --headless`.
 
 The code is split into a dependency-light parser/analytics crate and a Windows app crate. More detail is in [Architecture](docs/ARCHITECTURE.md).

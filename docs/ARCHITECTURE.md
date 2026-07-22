@@ -33,6 +33,8 @@ VRChat output_log_*.txt
 
 `minmaxxer-core` owns parsing, normalized models, live aggregation, focus inference, and run analysis. It has no Tauri, database, web-server, or OpenVR dependency and can be regression-tested with log fixtures.
 
+Historical run aggregation treats boss windows as the primary analysis scope whenever boss-start telemetry is present. Pre-boss activity is accumulated separately. Boss ends prefer matching named death/summary records, with later boss, intermission, lobby, world-exit, and stage boundaries retained as structural fallbacks. Live target inference is an experimental, exact-name network-ownership proxy with optional incoming-hit corroboration, confidence/evidence/age metadata, and encounter-boundary lifetime; it is not an authoritative hate source.
+
 The `minmaxxer` app owns Windows integration, persistence, the loopback API, file imports, WebView windows, and output lifecycle. The HTTP listener is bound before windows are created so startup fails clearly instead of silently selecting a different OBS URL.
 
 ## Local API
@@ -51,3 +53,5 @@ The `minmaxxer` app owns Windows integration, persistence, the loopback API, fil
 | `POST /api/rescan` | Rescan configured recent logs. |
 
 Static responses use a restrictive content-security policy and `no-store`. The server rejects non-loopback `Host` values to prevent DNS rebinding. Mutating endpoints require the installation's OS-random `X-MINMAXXER-Token`, which the same-origin app reads from settings; read-only OBS/SSE endpoints remain token-free. Uploaded logs are SHA-256-addressed inside the application import directory and identical monitored/imported files are reused instead of double-counted. The service is intentionally loopback-only.
+
+The health endpoint reports API version `2`; this version makes boss windows the primary run-summary scope and exposes the observed/pre-boss fields needed to audit that scope.

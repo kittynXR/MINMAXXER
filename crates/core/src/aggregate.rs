@@ -10,6 +10,10 @@ const RECENT_EVENT_LIMIT: usize = 40;
 const RECENT_HIT_DISPLAY_SECONDS: f64 = 60.0;
 const DAMAGE_WINDOW_SECONDS: i64 = 30;
 const MERGED_BOUNDARY_TOLERANCE_SECONDS: i64 = 10;
+const FOCUS_RECENT_SECONDS: f64 = 45.0;
+const FOCUS_AGING_SECONDS: f64 = 90.0;
+const FOCUS_CORROBORATION_WINDOW_SECONDS: f64 = 5.0;
+const FOCUS_CORROBORATION_DISPLAY_SECONDS: f64 = 8.0;
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct LiveEncounter {
@@ -39,6 +43,12 @@ pub struct FocusSignal {
     pub observed_at: NaiveDateTime,
     pub age_seconds: f64,
     pub confidence: String,
+    #[serde(default)]
+    pub evidence: String,
+    #[serde(default)]
+    pub corroborating_hits: u32,
+    #[serde(default)]
+    pub corroborated_at: Option<NaiveDateTime>,
     pub source_note: String,
 }
 
@@ -215,6 +225,13 @@ impl CombatEngine {
             EventKind::PlayerLeft => {
                 if let Some(player) = event.target.as_ref() {
                     self.roster.remove(player);
+                    if self
+                        .focus
+                        .as_ref()
+                        .is_some_and(|focus| focus.player == *player)
+                    {
+                        self.focus = None;
+                    }
                 }
             }
             EventKind::LocalPlayerIdentified => {
@@ -240,13 +257,26 @@ impl CombatEngine {
                     event.phase,
                 );
             }
-            EventKind::Intermission | EventKind::Lobby | EventKind::BossDefeated => {
+            EventKind::Intermission | EventKind::Lobby => {
                 self.update_duration(event.timestamp);
                 self.encounter.active = false;
                 self.focus = None;
                 if event.kind == EventKind::Lobby {
                     self.stage = None;
                     self.class_name = None;
+                }
+            }
+            EventKind::BossDefeated => {
+                // Phase N's named completion can be buffered until after phase N+1 starts. Never
+                // let that late event close the new live phase.
+                let closes_current = event
+                    .boss
+                    .as_ref()
+                    .is_some_and(|boss| entity_key(boss) == entity_key(&self.encounter.name));
+                if closes_current {
+                    self.update_duration(event.timestamp);
+                    self.encounter.active = false;
+                    self.focus = None;
                 }
             }
             EventKind::GameMessage if event.message.as_deref() == Some("session_invalidated") => {
@@ -332,6 +362,7 @@ impl CombatEngine {
                     0,
                     TimelinePoint {
                         timestamp: started_at,
+                        elapsed_seconds: Some(0.0),
                         outgoing: 0.0,
                         incoming: 0.0,
                         rolling_dps: 0.0,
@@ -351,6 +382,10 @@ impl CombatEngine {
             {
                 timeline.push(TimelinePoint {
                     timestamp,
+                    elapsed_seconds: self
+                        .encounter
+                        .started_at
+                        .map(|start| seconds_between(start, timestamp)),
                     outgoing: 0.0,
                     incoming: 0.0,
                     rolling_dps: outgoing.rolling_5s,
@@ -502,6 +537,7 @@ impl CombatEngine {
             .or_default() += amount;
         self.push_timeline(event.timestamp, 0.0, amount);
         self.update_duration(event.timestamp);
+        self.corroborate_focus(event);
     }
 
     fn ensure_combat_started(&mut self, timestamp: NaiveDateTime) {
@@ -539,6 +575,10 @@ impl CombatEngine {
         }
         self.timeline.push_back(TimelinePoint {
             timestamp,
+            elapsed_seconds: self
+                .encounter
+                .started_at
+                .map(|start| seconds_between(start, timestamp)),
             outgoing,
             incoming,
             rolling_dps,
@@ -578,10 +618,9 @@ impl CombatEngine {
         };
         let entity_name_key = entity_key(entity);
         let boss_key = entity_key(&self.encounter.name);
-        if entity_name_key.is_empty()
-            || boss_key.is_empty()
-            || !(entity_name_key.contains(&boss_key) || boss_key.contains(&entity_name_key))
-        {
+        // Sub-entities such as Fly, M41DPillar, M41DTower, and GravetenderOrb transfer ownership
+        // independently. Symmetric substring matching turns those mechanics into false targets.
+        if entity_name_key.is_empty() || boss_key.is_empty() || entity_name_key != boss_key {
             return;
         }
         self.focus = Some(FocusSignal {
@@ -589,10 +628,39 @@ impl CombatEngine {
             entity: entity.clone(),
             observed_at: event.timestamp,
             age_seconds: 0.0,
-            confidence: "inferred".to_owned(),
-            source_note: "Boss-matching VRChat network ownership; this may not equal hate/aggro."
-                .to_owned(),
+            confidence: "possible".to_owned(),
+            evidence: "boss_network_ownership".to_owned(),
+            corroborating_hits: 0,
+            corroborated_at: None,
+            source_note:
+                "Exact boss network ownership; a useful target proxy, not authoritative hate/aggro."
+                    .to_owned(),
         });
+    }
+
+    fn corroborate_focus(&mut self, event: &GameEvent) {
+        let Some(focus) = self.focus.as_mut() else {
+            return;
+        };
+        let Some(local_player) = event.player.as_deref().or(self.observed_player.as_deref()) else {
+            return;
+        };
+        if focus.player != local_player
+            || seconds_between(focus.observed_at, event.timestamp)
+                > FOCUS_CORROBORATION_WINDOW_SECONDS
+        {
+            return;
+        }
+
+        focus.corroborating_hits = focus.corroborating_hits.saturating_add(1);
+        let source_key = event.source.as_deref().map(entity_key).unwrap_or_default();
+        let boss_key = entity_key(&self.encounter.name);
+        let explicitly_boss_named =
+            !source_key.is_empty() && !boss_key.is_empty() && source_key.contains(&boss_key);
+        if explicitly_boss_named || focus.corroborating_hits >= 2 {
+            focus.corroborated_at = Some(event.timestamp);
+            focus.evidence = "boss_owner_plus_local_incoming".to_owned();
+        }
     }
 
     fn current_focus_at(&self, now: Option<NaiveDateTime>) -> Option<FocusSignal> {
@@ -602,7 +670,29 @@ impl CombatEngine {
             .max(now)
             .map(|now| seconds_between(focus.observed_at, now))
             .unwrap_or_default();
-        (focus.age_seconds <= 15.0).then_some(focus)
+        let corroboration_age = focus
+            .corroborated_at
+            .zip(self.last_event_at.max(now))
+            .map(|(observed, now)| seconds_between(observed, now));
+        if corroboration_age.is_some_and(|age| age <= FOCUS_CORROBORATION_DISPLAY_SECONDS) {
+            focus.confidence = "likely".to_owned();
+            focus.source_note = "Exact boss ownership plus immediate local incoming damage; still not an authoritative hate table."
+                .to_owned();
+        } else if focus.age_seconds <= FOCUS_RECENT_SECONDS {
+            focus.confidence = "possible".to_owned();
+            focus.source_note = "Exact boss network ownership; a useful target proxy, not authoritative hate/aggro."
+                .to_owned();
+        } else if focus.age_seconds <= FOCUS_AGING_SECONDS {
+            focus.confidence = "aging".to_owned();
+            focus.source_note = "No newer exact boss-owner transfer has been logged; showing the last observed candidate."
+                .to_owned();
+        } else {
+            focus.confidence = "stale".to_owned();
+            focus.source_note =
+                "Stale boss-owner candidate; retained until a new transfer or encounter boundary."
+                    .to_owned();
+        }
+        Some(focus)
     }
 
     fn recent_hits_at(&self, limit: usize, now: Option<NaiveDateTime>) -> Vec<RecentHit> {
@@ -804,7 +894,7 @@ fn is_run_activity(event: &GameEvent) -> bool {
 }
 
 fn summarize_run(id: String, session_id: Option<u32>, events: &[GameEvent]) -> RunSummary {
-    let started_at = events
+    let observed_started_at = events
         .iter()
         .find(|event| {
             matches!(
@@ -817,7 +907,7 @@ fn summarize_run(id: String, session_id: Option<u32>, events: &[GameEvent]) -> R
     // Lobby is the strongest end-of-run marker exposed by the audited logs. Retain a short peer
     // tolerance for imported collectors whose final hit lands just after the first lobby line,
     // then exclude the arbitrary post-run stay from both numerator and denominator.
-    let first_completion = started_at.and_then(|started_at| {
+    let first_completion = observed_started_at.and_then(|started_at| {
         events
             .iter()
             .find(|event| event.kind == EventKind::Lobby && event.timestamp >= started_at)
@@ -840,12 +930,12 @@ fn summarize_run(id: String, session_id: Option<u32>, events: &[GameEvent]) -> R
         })
         .unwrap_or(events.len());
     let events = &events[..effective_len];
-    let ended_at = first_completion
+    let observed_ended_at = first_completion
         .map(|completed_at| {
             events
                 .iter()
                 .filter(|event| {
-                    event.timestamp >= started_at.unwrap_or(event.timestamp)
+                    event.timestamp >= observed_started_at.unwrap_or(event.timestamp)
                         && matches!(
                             event.kind,
                             EventKind::DamageDealt
@@ -859,8 +949,8 @@ fn summarize_run(id: String, session_id: Option<u32>, events: &[GameEvent]) -> R
                 .unwrap_or(completed_at)
         })
         .or_else(|| events.last().map(|event| event.timestamp));
-    let duration_seconds = started_at
-        .zip(ended_at)
+    let observed_duration_seconds = observed_started_at
+        .zip(observed_ended_at)
         .map(|(start, end)| seconds_between(start, end))
         .unwrap_or_default();
     let completed = events
@@ -870,7 +960,6 @@ fn summarize_run(id: String, session_id: Option<u32>, events: &[GameEvent]) -> R
     let mut classes = BTreeSet::new();
     let mut stages = Vec::new();
     let mut recent_stage_boundaries: BTreeMap<String, NaiveDateTime> = BTreeMap::new();
-    let mut player_events: BTreeMap<String, Vec<&GameEvent>> = BTreeMap::new();
     for event in events {
         if let Some(class_name) = event.class_name.as_ref() {
             classes.insert(class_name.clone());
@@ -889,20 +978,135 @@ fn summarize_run(id: String, session_id: Option<u32>, events: &[GameEvent]) -> R
                 }
             }
         }
+    }
+
+    let windows = build_encounter_windows(events);
+    let encounters: Vec<_> = windows.iter().map(|window| window.stats.clone()).collect();
+    let boss_windows: Vec<_> = windows
+        .iter()
+        .filter(|window| window.stats.kind == "boss")
+        .collect();
+    let pre_boss_windows: Vec<_> = windows
+        .iter()
+        .filter(|window| window.stats.kind == "pre_boss")
+        .collect();
+    let boss_count = boss_windows.len();
+    let boss_events: Vec<_> = boss_windows
+        .iter()
+        .flat_map(|window| events[window.start..window.effective_end].iter())
+        .collect();
+    let pre_boss_events: Vec<_> = pre_boss_windows
+        .iter()
+        .flat_map(|window| events[window.start..window.effective_end].iter())
+        .collect();
+
+    let observed_outgoing = summarize_damage_events(events.iter(), observed_duration_seconds);
+    let observed_incoming = summarize_incoming_events(events.iter(), observed_duration_seconds);
+    let pre_boss_duration_seconds = pre_boss_windows
+        .iter()
+        .map(|window| window.stats.duration_seconds)
+        .sum();
+    let pre_boss_outgoing =
+        summarize_damage_events(pre_boss_events.iter().copied(), pre_boss_duration_seconds);
+    let pre_boss_incoming =
+        summarize_incoming_events(pre_boss_events.iter().copied(), pre_boss_duration_seconds);
+
+    // A run with named boss windows is analyzed exclusively over those windows. Partial imports
+    // that begin after a start marker retain an honest observed-combat fallback.
+    let metrics_scope = if boss_count > 0 {
+        "boss"
+    } else {
+        "observed_combat"
+    };
+    let duration_seconds = if boss_count > 0 {
+        boss_windows
+            .iter()
+            .map(|window| window.stats.duration_seconds)
+            .sum()
+    } else {
+        observed_duration_seconds
+    };
+    let started_at = if boss_count > 0 {
+        boss_windows
+            .iter()
+            .find_map(|window| window.stats.started_at)
+    } else {
+        observed_started_at
+    };
+    let ended_at = if boss_count > 0 {
+        boss_windows
+            .iter()
+            .rev()
+            .find_map(|window| window.stats.ended_at)
+    } else {
+        observed_ended_at
+    };
+    let metric_events: Vec<&GameEvent> = if boss_count > 0 {
+        boss_events
+    } else {
+        events.iter().collect()
+    };
+    let mut player_events: BTreeMap<String, Vec<&GameEvent>> = BTreeMap::new();
+    for event in &metric_events {
         if let Some(player) = event.player.as_ref() {
             player_events.entry(player.clone()).or_default().push(event);
         }
     }
-
-    let players: Vec<_> = player_events
+    let mut players: Vec<_> = player_events
         .iter()
         .map(|(player, events)| summarize_player(player, events, duration_seconds))
         .collect();
-    let outgoing = summarize_damage_events(events.iter(), duration_seconds);
-    let incoming = summarize_incoming_events(events.iter(), duration_seconds);
-    let attacks = summarize_attack_types(events.iter(), outgoing.total);
-    let timeline = summarize_timeline(events.iter(), started_at, ended_at);
-    let encounters = summarize_encounters(events);
+    if boss_count > 0 {
+        // Active time is participation within combat, not the wall-clock span between a player's
+        // first hit on boss one and last hit on a later boss. Sum the already bounded per-boss
+        // spans while retaining the shared total boss duration as every player's DPS denominator.
+        for player in &mut players {
+            player.active_seconds = boss_windows
+                .iter()
+                .filter_map(|window| {
+                    window
+                        .stats
+                        .players
+                        .iter()
+                        .find(|candidate| candidate.player == player.player)
+                })
+                .map(|candidate| candidate.active_seconds)
+                .sum::<f64>()
+                .min(duration_seconds);
+        }
+    }
+    let outgoing = if boss_count > 0 {
+        summarize_damage_events(metric_events.iter().copied(), duration_seconds)
+    } else {
+        observed_outgoing.clone()
+    };
+    let incoming = if boss_count > 0 {
+        summarize_incoming_events(metric_events.iter().copied(), duration_seconds)
+    } else {
+        observed_incoming.clone()
+    };
+    let attacks = summarize_attack_types(metric_events.iter().copied(), outgoing.total);
+    let timeline = if boss_count > 0 {
+        let mut combat_offset = 0.0;
+        let mut timeline = Vec::new();
+        for window in &boss_windows {
+            timeline.extend(window.stats.timeline.iter().cloned().map(|mut point| {
+                let local_elapsed = point.elapsed_seconds.unwrap_or_else(|| {
+                    window
+                        .stats
+                        .started_at
+                        .map(|start| seconds_between(start, point.timestamp))
+                        .unwrap_or_default()
+                });
+                point.elapsed_seconds = Some(combat_offset + local_elapsed);
+                point
+            }));
+            combat_offset += window.stats.duration_seconds;
+        }
+        timeline
+    } else {
+        summarize_timeline(metric_events.iter().copied(), started_at, ended_at)
+    };
 
     RunSummary {
         id,
@@ -910,6 +1114,16 @@ fn summarize_run(id: String, session_id: Option<u32>, events: &[GameEvent]) -> R
         started_at,
         ended_at,
         duration_seconds,
+        metrics_scope: metrics_scope.to_owned(),
+        boss_count,
+        observed_started_at,
+        observed_ended_at,
+        observed_duration_seconds,
+        observed_outgoing,
+        observed_incoming,
+        pre_boss_duration_seconds,
+        pre_boss_outgoing,
+        pre_boss_incoming,
         class_names: classes.into_iter().collect(),
         stages,
         players,
@@ -942,7 +1156,8 @@ fn summarize_player(player: &str, events: &[&GameEvent], observation_seconds: f6
     let active_seconds = first_combat
         .zip(last_combat)
         .map(|(start, end)| seconds_between(start, end).max(1.0))
-        .unwrap_or_default();
+        .unwrap_or_default()
+        .min(observation_seconds);
     let mut damage = DamageTotals::default();
     let mut incoming = IncomingTotals::default();
     let mut healing = 0.0;
@@ -984,7 +1199,14 @@ fn summarize_player(player: &str, events: &[&GameEvent], observation_seconds: f6
     }
 }
 
-fn summarize_encounters(events: &[GameEvent]) -> Vec<EncounterStats> {
+#[derive(Debug)]
+struct EncounterWindow {
+    start: usize,
+    effective_end: usize,
+    stats: EncounterStats,
+}
+
+fn build_encounter_windows(events: &[GameEvent]) -> Vec<EncounterWindow> {
     let mut starts = Vec::new();
     let mut recent_boundaries: BTreeMap<String, NaiveDateTime> = BTreeMap::new();
     for (index, event) in events.iter().enumerate() {
@@ -1005,10 +1227,41 @@ fn summarize_encounters(events: &[GameEvent]) -> Vec<EncounterStats> {
     for (position, start) in starts.iter().copied().enumerate() {
         let end = starts.get(position + 1).copied().unwrap_or(events.len());
         if start < end {
-            // Keep the complete boundary-to-boundary window. A second collector can log its
-            // final hit just after the first collector logs intermission, so closing on the first
-            // completion marker would silently discard valid party damage.
-            result.push(summarize_encounter(&events[start..end]));
+            let next_boundary = events.get(end);
+            // A few phase transitions announce the next phase immediately before writing the
+            // previous phase's named dead header. Look only through the peer-tolerance window so
+            // delayed buffered repeats cannot rewrite a much earlier structural boundary.
+            let late_named_end = if events[start].kind == EventKind::BossStarted {
+                let boss = events[start].boss.as_deref().unwrap_or_default();
+                next_boundary.and_then(|boundary| {
+                    let deadline = boundary.timestamp
+                        + chrono::Duration::seconds(MERGED_BOUNDARY_TOLERANCE_SECONDS);
+                    events[end..]
+                        .iter()
+                        .take_while(|event| event.timestamp <= deadline)
+                        .find(|event| {
+                            matches!(
+                                event.kind,
+                                EventKind::BossDefeated | EventKind::BossDamageSummary
+                            ) && event
+                                .boss
+                                .as_deref()
+                                .is_some_and(|candidate| entity_key(candidate) == entity_key(boss))
+                        })
+                })
+            } else {
+                None
+            };
+            let (stats, effective_len) = summarize_encounter_with_boundary(
+                &events[start..end],
+                next_boundary,
+                late_named_end,
+            );
+            result.push(EncounterWindow {
+                start,
+                effective_end: start + effective_len,
+                stats,
+            });
         }
     }
     result
@@ -1022,22 +1275,137 @@ fn encounter_boundary_key(event: &GameEvent) -> Option<String> {
     }
 }
 
+#[cfg(test)]
 fn summarize_encounter(events: &[GameEvent]) -> EncounterStats {
-    let first_completion = events
+    summarize_encounter_with_boundary(events, None, None).0
+}
+
+fn summarize_encounter_with_boundary(
+    events: &[GameEvent],
+    next_boundary: Option<&GameEvent>,
+    late_named_end: Option<&GameEvent>,
+) -> (EncounterStats, usize) {
+    debug_assert!(!events.is_empty());
+    let first = &events[0];
+    let kind = if first.kind == EventKind::BossStarted {
+        "boss"
+    } else {
+        "pre_boss"
+    };
+    let name = first
+        .boss
+        .clone()
+        .or_else(|| first.stage.clone())
+        .unwrap_or_else(|| "Encounter".to_owned());
+
+    let local_structural_end = events
         .iter()
-        .find(|event| {
-            matches!(
-                event.kind,
-                EventKind::BossDefeated | EventKind::Intermission | EventKind::Lobby
-            )
+        .enumerate()
+        .skip(1)
+        .find_map(|(index, event)| match event.kind {
+            EventKind::Intermission => Some((index, event.timestamp, "intermission", "structural")),
+            EventKind::Lobby => Some((index, event.timestamp, "lobby", "structural")),
+            EventKind::WorldExited => Some((index, event.timestamp, "world_exit", "structural")),
+            _ => None,
+        });
+    let boss_key = entity_key(&name);
+    let local_named_end = events
+        .iter()
+        .enumerate()
+        .skip(1)
+        .find_map(|(index, event)| {
+            let matching_named_boss_end = kind == "boss"
+                && matches!(
+                    event.kind,
+                    EventKind::BossDefeated | EventKind::BossDamageSummary
+                )
+                && event
+                    .boss
+                    .as_deref()
+                    .is_some_and(|boss| entity_key(boss) == boss_key);
+            if !matching_named_boss_end {
+                return None;
+            }
+
+            // Buffered completion lines can legitimately trail intermission by a few seconds.
+            // Lobby and world-exit are hard run boundaries, though, so never resurrect a
+            // named record logged after either of them (even at the same wall-clock second).
+            let within_valid_window =
+                local_structural_end.is_none_or(|(structural_index, structural_at, reason, _)| {
+                    match reason {
+                        "intermission" => {
+                            event.timestamp
+                                <= structural_at
+                                    + chrono::Duration::seconds(MERGED_BOUNDARY_TOLERANCE_SECONDS)
+                        }
+                        _ => index < structural_index,
+                    }
+                });
+            if !within_valid_window {
+                return None;
+            }
+
+            let reason = if event.kind == EventKind::BossDefeated {
+                "boss_defeated"
+            } else {
+                // Databases created by v0.1 stored the summary even when a zero total
+                // suppressed BossDefeated. A named summary still proves the dead header
+                // immediately preceded it and upgrades old history without a re-import.
+                "boss_summary"
+            };
+            Some((event.timestamp, reason, "explicit"))
+        });
+    let late_explicit_end = late_named_end.and_then(|event| {
+        let within_valid_window =
+            local_structural_end.is_none_or(|(_, structural_at, reason, _)| {
+                reason == "intermission"
+                    && event.timestamp
+                        <= structural_at
+                            + chrono::Duration::seconds(MERGED_BOUNDARY_TOLERANCE_SECONDS)
+            });
+        if !within_valid_window {
+            return None;
+        }
+        let reason = if event.kind == EventKind::BossDefeated {
+            "boss_defeated"
+        } else {
+            "boss_summary"
+        };
+        Some((event.timestamp, reason, "explicit"))
+    });
+    let named_end = local_named_end.or(late_explicit_end);
+    let next_structural_end = next_boundary.map(|event| {
+        let reason = match event.kind {
+            EventKind::BossStarted if kind == "pre_boss" => "boss_started",
+            EventKind::BossStarted => "next_boss",
+            EventKind::StageEntered => "next_stage",
+            _ => "next_boundary",
+        };
+        (event.timestamp, reason, "structural")
+    });
+    let local_structural_boundary =
+        local_structural_end.map(|(_, at, reason, confidence)| (at, reason, confidence));
+    let accepted_local_named_at = local_named_end.map(|(at, _, _)| at);
+    let boundary = named_end
+        .or(local_structural_boundary)
+        .or(next_structural_end);
+    let boundary_is_local = local_named_end.is_some()
+        || (late_explicit_end.is_none() && local_structural_end.is_some());
+    // A named completion buffered until after phase N+1 starts is stronger provenance than the
+    // structural transition, but it must not extend phase N into phase N+1's combat window.
+    let clamped_late_named_at = if local_named_end.is_none() {
+        late_explicit_end.and_then(|(late_at, _, _)| {
+            next_structural_end.map(|(next_at, _, _)| late_at.min(next_at))
         })
-        .or_else(|| {
-            events
-                .iter()
-                .find(|event| event.kind == EventKind::WorldExited)
-        })
-        .map(|event| event.timestamp);
-    let effective_len = first_completion
+    } else {
+        None
+    };
+    let first_local_completion = local_named_end
+        .map(|(at, _, _)| at)
+        .into_iter()
+        .chain(local_structural_end.map(|(_, at, _, _)| at))
+        .min();
+    let effective_len = first_local_completion
         .map(|completed_at| {
             let deadline =
                 completed_at + chrono::Duration::seconds(MERGED_BOUNDARY_TOLERANCE_SECONDS);
@@ -1049,32 +1417,40 @@ fn summarize_encounter(events: &[GameEvent]) -> EncounterStats {
         })
         .unwrap_or(events.len());
     let events = &events[..effective_len];
-    let first = &events[0];
-    let name = first
-        .boss
-        .clone()
-        .or_else(|| first.stage.clone())
-        .unwrap_or_else(|| "Encounter".to_owned());
     let started_at = Some(first.timestamp);
-    let ended_at = first_completion
-        .or_else(|| events.last().map(|event| event.timestamp))
-        .map(|completed_at| {
+    let ended_at = boundary
+        .map(|(completed_at, _, _)| {
+            if !boundary_is_local {
+                return clamped_late_named_at.unwrap_or(completed_at);
+            }
             events
                 .iter()
                 .filter(|event| {
-                    matches!(
-                        event.kind,
-                        EventKind::DamageDealt
-                            | EventKind::DamageTaken
-                            | EventKind::BossDefeated
-                            | EventKind::Intermission
-                            | EventKind::Lobby
-                            | EventKind::WorldExited
-                    )
+                    matches!(event.kind, EventKind::DamageDealt | EventKind::DamageTaken)
+                        || matches!(
+                            event.kind,
+                            EventKind::Intermission | EventKind::Lobby | EventKind::WorldExited
+                        )
+                        || (matches!(
+                            event.kind,
+                            EventKind::BossDefeated | EventKind::BossDamageSummary
+                        ) && accepted_local_named_at == Some(event.timestamp)
+                            && event
+                                .boss
+                                .as_deref()
+                                .is_some_and(|boss| entity_key(boss) == entity_key(&name)))
                 })
                 .map(|event| event.timestamp)
                 .max()
                 .unwrap_or(completed_at)
+        })
+        .or_else(|| {
+            events
+                .iter()
+                .rev()
+                .find(|event| matches!(event.kind, EventKind::DamageDealt | EventKind::DamageTaken))
+                .or_else(|| events.last())
+                .map(|event| event.timestamp)
         });
     let duration_seconds = started_at
         .zip(ended_at)
@@ -1093,10 +1469,12 @@ fn summarize_encounter(events: &[GameEvent]) -> EncounterStats {
     let outgoing = summarize_damage_events(events.iter(), duration_seconds);
     let incoming = summarize_incoming_events(events.iter(), duration_seconds);
     let attacks = summarize_attack_types(events.iter(), outgoing.total);
+    let timeline = summarize_timeline(events.iter(), started_at, ended_at);
 
-    EncounterStats {
+    let stats = EncounterStats {
         id: format!("{}-{}", first.timestamp.format("%Y%m%d%H%M%S"), slug(&name)),
         name,
+        kind: kind.to_owned(),
         stage: first.stage.clone(),
         phase: first.phase,
         started_at,
@@ -1106,16 +1484,18 @@ fn summarize_encounter(events: &[GameEvent]) -> EncounterStats {
         outgoing,
         incoming,
         attacks,
-        completed: events.iter().any(|event| {
-            matches!(
-                event.kind,
-                EventKind::BossDefeated
-                    | EventKind::Intermission
-                    | EventKind::Lobby
-                    | EventKind::WorldExited
-            )
-        }),
-    }
+        timeline,
+        completed: boundary.is_some(),
+        end_reason: boundary
+            .map(|(_, reason, _)| reason)
+            .unwrap_or("open")
+            .to_owned(),
+        boundary_confidence: boundary
+            .map(|(_, _, confidence)| confidence)
+            .unwrap_or("open")
+            .to_owned(),
+    };
+    (stats, effective_len)
 }
 
 fn summarize_attack_types<'a>(
@@ -1255,6 +1635,7 @@ fn summarize_timeline<'a>(
         }
         result.push(TimelinePoint {
             timestamp,
+            elapsed_seconds: observation_start.map(|start| seconds_between(start, timestamp)),
             outgoing,
             incoming,
             rolling_dps: rolling_outgoing.max(0.0) / 5.0,
@@ -1439,7 +1820,7 @@ mod tests {
     }
 
     #[test]
-    fn wall_clock_snapshots_decay_windows_and_expire_inferred_focus() {
+    fn wall_clock_snapshots_decay_windows_and_age_inferred_focus() {
         let mut engine = CombatEngine::new();
         engine.ingest(event(0, EventKind::BossStarted, 0.0));
         engine.ingest(event(1, EventKind::DamageDealt, 100.0));
@@ -1456,7 +1837,9 @@ mod tests {
         assert_eq!(snapshot.outgoing.dps, 5.0);
         assert_eq!(snapshot.outgoing.rolling_5s, 0.0);
         assert_eq!(snapshot.recent_hits[0].age_seconds, 19.0);
-        assert!(snapshot.focus.is_none());
+        let focus = snapshot.focus.as_ref().expect("target candidate persists");
+        assert_eq!(focus.player, "PlayerOne");
+        assert_eq!(focus.confidence, "possible");
         assert_eq!(
             snapshot.timeline.first().unwrap().timestamp,
             event(0, EventKind::BossStarted, 0.0).timestamp
@@ -1472,6 +1855,66 @@ mod tests {
             .recent_hits
             .is_empty());
         assert!(!engine.requires_clock_tick_at(Some(expiry_clock + chrono::Duration::seconds(1))));
+    }
+
+    #[test]
+    fn inferred_focus_uses_exact_boss_entities_and_persists_as_aging_then_stale() {
+        let mut engine = CombatEngine::new();
+        let mut boss = event(0, EventKind::BossStarted, 0.0);
+        boss.boss = Some("FlyLord".to_owned());
+        engine.ingest(boss);
+
+        let mut sub_entity = event(1, EventKind::OwnershipTransferred, 0.0);
+        sub_entity.entity = Some("Fly(Clone)".to_owned());
+        sub_entity.target = Some("PlayerOne".to_owned());
+        engine.ingest(sub_entity);
+        assert!(engine.snapshot().focus.is_none());
+
+        let mut exact = event(2, EventKind::OwnershipTransferred, 0.0);
+        exact.entity = Some("FlyLord(Clone)".to_owned());
+        exact.target = Some("PlayerOne".to_owned());
+        engine.ingest(exact.clone());
+        assert_eq!(engine.snapshot().focus.unwrap().confidence, "possible");
+
+        let aging_at = exact.timestamp + chrono::Duration::seconds(60);
+        let aging = engine.snapshot_at(Some(aging_at)).focus.unwrap();
+        assert_eq!(aging.confidence, "aging");
+        assert_eq!(aging.age_seconds, 60.0);
+
+        let stale_at = exact.timestamp + chrono::Duration::seconds(120);
+        let stale = engine.snapshot_at(Some(stale_at)).focus.unwrap();
+        assert_eq!(stale.confidence, "stale");
+        assert_eq!(stale.age_seconds, 120.0);
+
+        let mut next_boss = event(3, EventKind::BossStarted, 0.0);
+        next_boss.boss = Some("M41D".to_owned());
+        engine.ingest(next_boss);
+        let mut pillar = event(4, EventKind::OwnershipTransferred, 0.0);
+        pillar.entity = Some("M41DPillar(Clone)".to_owned());
+        pillar.target = Some("PlayerOne".to_owned());
+        engine.ingest(pillar);
+        assert!(engine.snapshot().focus.is_none());
+    }
+
+    #[test]
+    fn immediate_local_incoming_damage_corroborates_focus_candidate() {
+        let mut engine = CombatEngine::new();
+        engine.ingest(event(0, EventKind::BossStarted, 0.0));
+
+        let mut ownership = event(1, EventKind::OwnershipTransferred, 0.0);
+        ownership.entity = Some("TestBoss(Clone)".to_owned());
+        ownership.target = Some("PlayerOne".to_owned());
+        engine.ingest(ownership);
+
+        let mut incoming = event(2, EventKind::DamageTaken, 25.0);
+        incoming.source = Some("TestBoss(Clone)".to_owned());
+        engine.ingest(incoming);
+
+        let focus = engine.snapshot().focus.expect("corroborated focus");
+        assert_eq!(focus.confidence, "likely");
+        assert_eq!(focus.evidence, "boss_owner_plus_local_incoming");
+        assert_eq!(focus.corroborating_hits, 1);
+        assert!(focus.corroborated_at.is_some());
     }
 
     #[test]
@@ -1723,6 +2166,376 @@ mod tests {
         assert_eq!(run.duration_seconds, 7.0);
         assert_eq!(run.outgoing.total, 125.0);
         assert_eq!(run.event_count, 4);
+    }
+
+    #[test]
+    fn boss_scope_excludes_and_separately_reports_pre_boss_damage() {
+        let mut stage = event(0, EventKind::StageEntered, 0.0);
+        stage.boss = None;
+        stage.phase = Some(0.1);
+
+        let mut trash_hit = event(1, EventKind::DamageDealt, 100.0);
+        trash_hit.boss = None;
+        trash_hit.phase = Some(0.1);
+
+        let mut boss_started = event(10, EventKind::BossStarted, 0.0);
+        boss_started.phase = Some(1.0);
+        let boss_hit = event(11, EventKind::DamageDealt, 200.0);
+        let boss_defeated = event(20, EventKind::BossDefeated, 0.0);
+
+        let run = summarize_run(
+            "session-42".to_owned(),
+            Some(42),
+            &[stage, trash_hit, boss_started, boss_hit, boss_defeated],
+        );
+
+        assert_eq!(run.metrics_scope, "boss");
+        assert_eq!(run.boss_count, 1);
+        assert_eq!(run.duration_seconds, 10.0);
+        assert_eq!(run.outgoing.total, 200.0);
+        assert_eq!(run.outgoing.hits, 1);
+        assert_eq!(run.outgoing.dps, 20.0);
+        assert_eq!(run.pre_boss_duration_seconds, 10.0);
+        assert_eq!(run.pre_boss_outgoing.total, 100.0);
+        assert_eq!(run.observed_outgoing.total, 300.0);
+        assert_eq!(run.observed_duration_seconds, 20.0);
+
+        assert_eq!(run.encounters.len(), 2);
+        assert_eq!(run.encounters[0].kind, "pre_boss");
+        assert_eq!(run.encounters[0].end_reason, "boss_started");
+        assert_eq!(run.encounters[0].boundary_confidence, "structural");
+        assert_eq!(run.encounters[0].outgoing.total, 100.0);
+        assert_eq!(run.encounters[1].kind, "boss");
+        assert_eq!(run.encounters[1].end_reason, "boss_defeated");
+        assert_eq!(run.encounters[1].boundary_confidence, "explicit");
+        assert_eq!(run.encounters[1].outgoing.total, 200.0);
+        assert_eq!(
+            run.encounters[1].timeline.first().unwrap().timestamp,
+            event(10, EventKind::BossStarted, 0.0).timestamp
+        );
+        assert_eq!(
+            run.encounters[1].timeline.last().unwrap().timestamp,
+            event(20, EventKind::BossDefeated, 0.0).timestamp
+        );
+        assert!(run.encounters[1]
+            .timeline
+            .iter()
+            .any(|point| point.outgoing == 200.0));
+    }
+
+    #[test]
+    fn late_prior_phase_death_attaches_by_name_without_closing_next_phase() {
+        let mut phase_two = event(0, EventKind::BossStarted, 0.0);
+        phase_two.boss = Some("JimBringerPhase2".to_owned());
+        phase_two.phase = Some(2.0);
+        let mut phase_two_hit = event(1, EventKind::DamageDealt, 125.0);
+        phase_two_hit.boss = Some("JimBringerPhase2".to_owned());
+        phase_two_hit.phase = Some(2.0);
+
+        let mut phase_three = event(10, EventKind::BossStarted, 0.0);
+        phase_three.boss = Some("JimBringerPhase3".to_owned());
+        phase_three.phase = Some(3.0);
+        let mut delayed_phase_two_death = event(10, EventKind::BossDefeated, 0.0);
+        delayed_phase_two_death.boss = Some("JimBringerPhase2".to_owned());
+        delayed_phase_two_death.phase = Some(3.0);
+        let mut phase_three_hit = event(11, EventKind::DamageDealt, 250.0);
+        phase_three_hit.boss = Some("JimBringerPhase3".to_owned());
+        phase_three_hit.phase = Some(3.0);
+
+        let events = vec![
+            phase_two,
+            phase_two_hit,
+            phase_three,
+            delayed_phase_two_death,
+            phase_three_hit,
+        ];
+        let run = summarize_run("session-42".to_owned(), Some(42), &events);
+        assert_eq!(run.encounters.len(), 2);
+        assert_eq!(run.encounters[0].name, "JimBringerPhase2");
+        assert_eq!(run.encounters[0].end_reason, "boss_defeated");
+        assert_eq!(run.encounters[0].boundary_confidence, "explicit");
+        assert!(run.encounters[0].completed);
+        assert_eq!(run.encounters[0].duration_seconds, 10.0);
+        assert_eq!(run.encounters[0].outgoing.total, 125.0);
+        assert_eq!(run.encounters[1].name, "JimBringerPhase3");
+        assert_eq!(run.encounters[1].end_reason, "open");
+        assert!(!run.encounters[1].completed);
+        assert_eq!(run.encounters[1].outgoing.total, 250.0);
+
+        let mut engine = CombatEngine::new();
+        for value in events {
+            engine.ingest(value);
+        }
+        let live = engine.snapshot();
+        assert_eq!(live.encounter.name, "JimBringerPhase3");
+        assert!(live.encounter.active);
+        assert_eq!(live.outgoing.total, 250.0);
+    }
+
+    #[test]
+    fn delayed_prior_phase_death_is_explicit_but_clamped_to_next_phase_start() {
+        let mut phase_two = event(0, EventKind::BossStarted, 0.0);
+        phase_two.boss = Some("JimBringerPhase2".to_owned());
+        let mut phase_two_hit = event(1, EventKind::DamageDealt, 125.0);
+        phase_two_hit.boss = Some("JimBringerPhase2".to_owned());
+
+        let mut phase_three = event(10, EventKind::BossStarted, 0.0);
+        phase_three.boss = Some("JimBringerPhase3".to_owned());
+        let mut delayed_phase_two_death = event(12, EventKind::BossDefeated, 0.0);
+        delayed_phase_two_death.boss = Some("JimBringerPhase2".to_owned());
+        let mut phase_three_hit = event(13, EventKind::DamageDealt, 250.0);
+        phase_three_hit.boss = Some("JimBringerPhase3".to_owned());
+        let mut phase_three_death = event(20, EventKind::BossDefeated, 0.0);
+        phase_three_death.boss = Some("JimBringerPhase3".to_owned());
+
+        let run = summarize_run(
+            "session-42".to_owned(),
+            Some(42),
+            &[
+                phase_two,
+                phase_two_hit,
+                phase_three.clone(),
+                delayed_phase_two_death,
+                phase_three_hit,
+                phase_three_death,
+            ],
+        );
+        let boss_encounters: Vec<_> = run
+            .encounters
+            .iter()
+            .filter(|encounter| encounter.kind == "boss")
+            .collect();
+        assert_eq!(boss_encounters.len(), 2);
+        assert_eq!(boss_encounters[0].end_reason, "boss_defeated");
+        assert_eq!(boss_encounters[0].boundary_confidence, "explicit");
+        assert_eq!(boss_encounters[0].ended_at, Some(phase_three.timestamp));
+        assert_eq!(boss_encounters[0].duration_seconds, 10.0);
+        assert_eq!(
+            boss_encounters[0].timeline.last().unwrap().elapsed_seconds,
+            Some(10.0)
+        );
+        assert_eq!(boss_encounters[1].started_at, Some(phase_three.timestamp));
+        assert_eq!(boss_encounters[1].duration_seconds, 10.0);
+
+        let summed_duration: f64 = boss_encounters
+            .iter()
+            .map(|encounter| encounter.duration_seconds)
+            .sum();
+        assert_eq!(summed_duration, 20.0);
+        assert_eq!(run.duration_seconds, summed_duration);
+        assert_eq!(run.timeline.first().unwrap().elapsed_seconds, Some(0.0));
+        assert_eq!(run.timeline.last().unwrap().elapsed_seconds, Some(20.0));
+        assert!(run.timeline.windows(2).all(|points| {
+            points[0].elapsed_seconds.unwrap() <= points[1].elapsed_seconds.unwrap()
+        }));
+    }
+
+    #[test]
+    fn encounter_boundaries_fall_back_to_next_start_and_intermission() {
+        let mut stage = event(0, EventKind::StageEntered, 0.0);
+        stage.boss = None;
+        let mut first_boss = event(10, EventKind::BossStarted, 0.0);
+        first_boss.boss = Some("FirstBoss".to_owned());
+        let mut first_hit = event(11, EventKind::DamageDealt, 75.0);
+        first_hit.boss = Some("FirstBoss".to_owned());
+        let mut second_boss = event(20, EventKind::BossStarted, 0.0);
+        second_boss.boss = Some("SecondBoss".to_owned());
+        let mut second_hit = event(21, EventKind::DamageDealt, 125.0);
+        second_hit.boss = Some("SecondBoss".to_owned());
+        let intermission = event(30, EventKind::Intermission, 0.0);
+
+        let run = summarize_run(
+            "session-42".to_owned(),
+            Some(42),
+            &[
+                stage,
+                first_boss,
+                first_hit,
+                second_boss,
+                second_hit,
+                intermission,
+            ],
+        );
+        assert_eq!(run.encounters.len(), 3);
+        assert_eq!(run.encounters[0].end_reason, "boss_started");
+        assert_eq!(run.encounters[1].end_reason, "next_boss");
+        assert_eq!(run.encounters[2].end_reason, "intermission");
+        assert!(run.encounters.iter().all(|encounter| encounter.completed));
+        assert!(run
+            .encounters
+            .iter()
+            .all(|encounter| encounter.boundary_confidence == "structural"));
+        assert_eq!(run.outgoing.total, 200.0);
+    }
+
+    #[test]
+    fn named_damage_summary_is_an_explicit_legacy_boss_boundary() {
+        let started = event(0, EventKind::BossStarted, 0.0);
+        let hit = event(1, EventKind::DamageDealt, 50.0);
+        let summary = event(5, EventKind::BossDamageSummary, 0.0);
+        let run = summarize_run("session-42".to_owned(), Some(42), &[started, hit, summary]);
+        assert_eq!(run.encounters.len(), 1);
+        assert_eq!(run.encounters[0].end_reason, "boss_summary");
+        assert_eq!(run.encounters[0].boundary_confidence, "explicit");
+        assert!(run.encounters[0].completed);
+    }
+
+    #[test]
+    fn matching_named_death_after_intermission_wins_within_peer_tolerance() {
+        let started = event(0, EventKind::BossStarted, 0.0);
+        let hit = event(1, EventKind::DamageDealt, 50.0);
+        let intermission = event(5, EventKind::Intermission, 0.0);
+        let mut peer_hit = event(6, EventKind::DamageDealt, 25.0);
+        peer_hit.player = Some("Beta".to_owned());
+        let named_death = event(7, EventKind::BossDefeated, 0.0);
+
+        let encounter = summarize_encounter(&[started, hit, intermission, peer_hit, named_death]);
+        assert_eq!(encounter.end_reason, "boss_defeated");
+        assert_eq!(encounter.boundary_confidence, "explicit");
+        assert_eq!(
+            encounter.ended_at,
+            Some(event(7, EventKind::BossDefeated, 0.0).timestamp)
+        );
+        assert_eq!(encounter.duration_seconds, 7.0);
+        assert_eq!(encounter.outgoing.total, 75.0);
+    }
+
+    #[test]
+    fn stale_named_deaths_cannot_override_intermission_or_lobby_boundaries() {
+        let started = event(0, EventKind::BossStarted, 0.0);
+        let hit = event(1, EventKind::DamageDealt, 50.0);
+        let intermission = event(5, EventKind::Intermission, 0.0);
+        let named_too_late = event(20, EventKind::BossDefeated, 0.0);
+        let encounter =
+            summarize_encounter(&[started.clone(), hit.clone(), intermission, named_too_late]);
+        assert_eq!(encounter.end_reason, "intermission");
+        assert_eq!(encounter.boundary_confidence, "structural");
+        assert_eq!(encounter.duration_seconds, 5.0);
+
+        let lobby = event(5, EventKind::Lobby, 0.0);
+        let named_after_lobby = event(6, EventKind::BossDefeated, 0.0);
+        let run = summarize_run(
+            "session-42".to_owned(),
+            Some(42),
+            &[started, hit, lobby, named_after_lobby],
+        );
+        assert_eq!(run.encounters.len(), 1);
+        assert_eq!(run.encounters[0].end_reason, "lobby");
+        assert_eq!(run.encounters[0].boundary_confidence, "structural");
+        assert_eq!(run.encounters[0].duration_seconds, 5.0);
+    }
+
+    #[test]
+    fn combined_boss_timeline_concatenates_combat_time_across_long_gaps() {
+        let first_started = event(0, EventKind::BossStarted, 0.0);
+        let first_hit = event(1, EventKind::DamageDealt, 100.0);
+        let first_defeated = event(10, EventKind::BossDefeated, 0.0);
+
+        let mut pre_boss_stage = event(11, EventKind::StageEntered, 0.0);
+        pre_boss_stage.boss = None;
+        let mut trash_hit = event(20, EventKind::DamageDealt, 500.0);
+        trash_hit.boss = None;
+
+        let long_gap = chrono::Duration::minutes(10);
+        let mut second_started = event(40, EventKind::BossStarted, 0.0);
+        second_started.timestamp += long_gap;
+        second_started.boss = Some("SecondBoss".to_owned());
+        let mut second_hit = event(41, EventKind::DamageDealt, 200.0);
+        second_hit.timestamp += long_gap;
+        second_hit.boss = Some("SecondBoss".to_owned());
+        let mut second_defeated = event(55, EventKind::BossDefeated, 0.0);
+        second_defeated.timestamp += long_gap;
+        second_defeated.boss = Some("SecondBoss".to_owned());
+
+        let run = summarize_run(
+            "session-42".to_owned(),
+            Some(42),
+            &[
+                first_started,
+                first_hit,
+                first_defeated,
+                pre_boss_stage,
+                trash_hit,
+                second_started,
+                second_hit,
+                second_defeated,
+            ],
+        );
+        assert_eq!(run.boss_count, 2);
+        assert_eq!(run.duration_seconds, 25.0);
+        assert_eq!(run.outgoing.total, 300.0);
+        assert_eq!(run.timeline.first().unwrap().elapsed_seconds, Some(0.0));
+        assert_eq!(run.timeline.last().unwrap().elapsed_seconds, Some(25.0));
+        assert!(
+            seconds_between(
+                run.timeline.first().unwrap().timestamp,
+                run.timeline.last().unwrap().timestamp
+            ) > 600.0
+        );
+
+        let boss_encounters: Vec<_> = run
+            .encounters
+            .iter()
+            .filter(|encounter| encounter.kind == "boss")
+            .collect();
+        assert_eq!(
+            boss_encounters[0].timeline.last().unwrap().elapsed_seconds,
+            Some(10.0)
+        );
+        assert_eq!(
+            boss_encounters[1].timeline.first().unwrap().elapsed_seconds,
+            Some(0.0)
+        );
+        assert_eq!(
+            boss_encounters[1].timeline.last().unwrap().elapsed_seconds,
+            Some(15.0)
+        );
+    }
+
+    #[test]
+    fn boss_scoped_player_activity_sums_each_fight_without_idle_gap() {
+        let first_started = event(0, EventKind::BossStarted, 0.0);
+        let mut first_hit = event(1, EventKind::DamageDealt, 100.0);
+        first_hit.player = Some("SparsePlayer".to_owned());
+        let first_defeated = event(10, EventKind::BossDefeated, 0.0);
+
+        let long_gap = chrono::Duration::minutes(10);
+        let mut second_started = event(20, EventKind::BossStarted, 0.0);
+        second_started.timestamp += long_gap;
+        second_started.boss = Some("SecondBoss".to_owned());
+        let mut second_hit = event(21, EventKind::DamageDealt, 100.0);
+        second_hit.timestamp += long_gap;
+        second_hit.boss = Some("SecondBoss".to_owned());
+        second_hit.player = Some("SparsePlayer".to_owned());
+        let mut second_defeated = event(30, EventKind::BossDefeated, 0.0);
+        second_defeated.timestamp += long_gap;
+        second_defeated.boss = Some("SecondBoss".to_owned());
+
+        let run = summarize_run(
+            "session-42".to_owned(),
+            Some(42),
+            &[
+                first_started,
+                first_hit,
+                first_defeated,
+                second_started,
+                second_hit,
+                second_defeated,
+            ],
+        );
+        assert_eq!(run.boss_count, 2);
+        assert_eq!(run.duration_seconds, 20.0);
+
+        let player = run
+            .players
+            .iter()
+            .find(|player| player.player == "SparsePlayer")
+            .unwrap();
+        assert_eq!(player.damage.total, 200.0);
+        assert_eq!(player.damage.dps, 10.0);
+        assert_eq!(player.active_seconds, 2.0);
+        assert_eq!(player.active_seconds / run.duration_seconds, 0.1);
+        assert!(player.active_seconds < run.duration_seconds);
     }
 
     #[test]

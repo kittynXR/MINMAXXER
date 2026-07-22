@@ -142,7 +142,7 @@ async fn health(State(state): State<ServerState>) -> Response {
             "version": env!("CARGO_PKG_VERSION"),
             "uptime_seconds": state.started_at.elapsed().as_secs(),
             "storage": storage,
-            "api": 1,
+            "api": 2,
         }))
         .into_response(),
         Err(error) => error_response(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),

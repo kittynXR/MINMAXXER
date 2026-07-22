@@ -69,8 +69,6 @@ static ENEMY_DIAGNOSTIC: LazyLock<Regex> = LazyLock::new(|| {
 struct PendingBossSummary {
     boss: String,
     ttl: u8,
-    strike: f64,
-    key: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -362,6 +360,7 @@ impl EclipticaParser {
         if message == "ECLIPTICA - now in intermission" {
             self.boss = None;
             self.phase = None;
+            self.pending_boss_summary = None;
             self.suppress_boss_until_stage = true;
             return self.emit(parsed.timestamp, EventKind::Intermission, line, |_| {});
         }
@@ -371,6 +370,7 @@ impl EclipticaParser {
             self.stage = None;
             self.class_name = None;
             self.phase = None;
+            self.pending_boss_summary = None;
             self.suppress_boss_until_stage = true;
             return self.emit(parsed.timestamp, EventKind::Lobby, line, |_| {});
         }
@@ -406,49 +406,46 @@ impl EclipticaParser {
         }
 
         if let Some(caps) = BOSS_DEAD.captures(message) {
-            let boss = caps["boss"].to_owned();
+            if !self.in_world || self.suppress_boss_until_stage {
+                return ParseOutcome::Ignored;
+            }
+            let boss = clean_clone_suffix(&caps["boss"]);
             let key = self.encounter_key(&boss);
             self.pending_boss_summary = Some(PendingBossSummary {
-                boss,
+                boss: boss.clone(),
                 ttl: 4,
-                strike: 0.0,
-                key,
             });
-            // The header is heavily duplicated by Ecliptica's buffered/save path. Wait for the
-            // following non-zero personal summary before declaring a canonical completion.
+            // A zero personal total means this collector dealt no damage; it does not mean the
+            // boss survived. The explicit, named dead header is the canonical end signal. It can
+            // arrive just after the next phase starts, so preserve the header's boss name and let
+            // aggregation match it to the corresponding phase instead of closing the current one.
+            if self.completed_encounters.insert(key) {
+                return self.emit(parsed.timestamp, EventKind::BossDefeated, line, |event| {
+                    event.boss = Some(boss);
+                    event.message = Some("Explicit named boss-dead header".to_owned());
+                });
+            }
             return ParseOutcome::Ignored;
         }
 
         if let Some(caps) = DAMAGE_SUMMARY.captures(message) {
-            if let Some(mut pending) = self.pending_boss_summary.take() {
+            if let Some(pending) = self.pending_boss_summary.take() {
                 let damage_type = caps["kind"].to_ascii_lowercase();
                 let amount = caps["amount"].parse::<f64>().unwrap_or_default();
+                let boss = pending.boss.clone();
                 if damage_type == "strike" {
-                    pending.strike = amount;
-                    let boss = pending.boss.clone();
                     self.pending_boss_summary = Some(pending);
-                    return self.emit(
-                        parsed.timestamp,
-                        EventKind::BossDamageSummary,
-                        line,
-                        |event| {
-                            event.boss = Some(boss);
-                            event.amount = Some(amount);
-                            event.damage_type = Some(damage_type);
-                        },
-                    );
                 }
-                let total = pending.strike + amount;
-                if total > 0.0 && self.completed_encounters.insert(pending.key) {
-                    let boss = pending.boss;
-                    return self.emit(parsed.timestamp, EventKind::BossDefeated, line, |event| {
+                return self.emit(
+                    parsed.timestamp,
+                    EventKind::BossDamageSummary,
+                    line,
+                    |event| {
                         event.boss = Some(boss);
-                        event.amount = Some(total);
-                        event.damage_type = Some("personal_total".to_owned());
-                        event.message = Some("Canonical non-zero personal boss summary".to_owned());
-                    });
-                }
-                return ParseOutcome::Ignored;
+                        event.amount = Some(amount);
+                        event.damage_type = Some(damage_type);
+                    },
+                );
             }
         }
 
@@ -710,9 +707,13 @@ mod tests {
     #[test]
     fn associates_multiline_boss_summary() {
         let mut parser = parser_in_world();
-        parser.process_line(
+        let ParseOutcome::Event(defeated) = parser.process_line(
             "2026.07.21 20:58:07 Debug      -  Boss Nan dead, personal damage dealt: ",
-        );
+        ) else {
+            panic!("expected the named dead header to complete the boss");
+        };
+        assert_eq!(defeated.kind, EventKind::BossDefeated);
+        assert_eq!(defeated.boss.as_deref(), Some("Nan"));
         let ParseOutcome::Event(summary) =
             parser.process_line("2026.07.21 20:58:07 Debug      -  STRIKE DMG: 2569")
         else {
@@ -721,6 +722,76 @@ mod tests {
         assert_eq!(summary.kind, EventKind::BossDamageSummary);
         assert_eq!(summary.boss.as_deref(), Some("Nan"));
         assert_eq!(summary.amount, Some(2569.0));
+    }
+
+    #[test]
+    fn zero_damage_named_boss_death_emits_completion_and_both_summaries() {
+        let mut parser = parser_in_world();
+        let ParseOutcome::Event(defeated) = parser.process_line(
+            "2026.07.21 20:58:07 Debug      -  Boss JimBringerPhase2 dead, personal damage dealt: ",
+        ) else {
+            panic!("zero personal damage must not suppress a named boss completion");
+        };
+        assert_eq!(defeated.kind, EventKind::BossDefeated);
+        assert_eq!(defeated.boss.as_deref(), Some("JimBringerPhase2"));
+
+        let ParseOutcome::Event(strike) =
+            parser.process_line("2026.07.21 20:58:07 Debug      -  STRIKE DMG: 0")
+        else {
+            panic!("expected the zero strike summary");
+        };
+        assert_eq!(strike.kind, EventKind::BossDamageSummary);
+        assert_eq!(strike.boss.as_deref(), Some("JimBringerPhase2"));
+        assert_eq!(strike.amount, Some(0.0));
+        assert_eq!(strike.damage_type.as_deref(), Some("strike"));
+
+        let ParseOutcome::Event(non_strike) =
+            parser.process_line("2026.07.21 20:58:07 Debug      -  NON-STRIKE DMG: 0")
+        else {
+            panic!("expected the zero non-strike summary");
+        };
+        assert_eq!(non_strike.kind, EventKind::BossDamageSummary);
+        assert_eq!(non_strike.boss.as_deref(), Some("JimBringerPhase2"));
+        assert_eq!(non_strike.amount, Some(0.0));
+        assert_eq!(non_strike.damage_type.as_deref(), Some("non-strike"));
+    }
+
+    #[test]
+    fn duplicate_and_post_lobby_boss_death_headers_are_suppressed() {
+        let mut parser = parser_in_world();
+        assert!(matches!(
+            parser.process_line(
+                "2026.07.21 20:58:07 Debug      -  Boss Nan dead, personal damage dealt: "
+            ),
+            ParseOutcome::Event(GameEvent {
+                kind: EventKind::BossDefeated,
+                ..
+            })
+        ));
+        assert_eq!(
+            parser.process_line(
+                "2026.07.21 20:58:08 Debug      -  Boss Nan dead, personal damage dealt: "
+            ),
+            ParseOutcome::Ignored
+        );
+
+        assert!(matches!(
+            parser.process_line("2026.07.21 20:59:00 Debug      -  ECLIPTICA - now in lobby"),
+            ParseOutcome::Event(GameEvent {
+                kind: EventKind::Lobby,
+                ..
+            })
+        ));
+        assert_eq!(
+            parser.process_line(
+                "2026.07.21 20:59:01 Debug      -  Boss BufferedOldBoss dead, personal damage dealt: "
+            ),
+            ParseOutcome::Ignored
+        );
+        assert!(!matches!(
+            parser.process_line("2026.07.21 20:59:01 Debug      -  STRIKE DMG: 100"),
+            ParseOutcome::Event(_)
+        ));
     }
 
     #[test]

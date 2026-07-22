@@ -163,6 +163,8 @@ pub struct PlayerStats {
 pub struct EncounterStats {
     pub id: String,
     pub name: String,
+    #[serde(default)]
+    pub kind: String,
     pub stage: Option<String>,
     pub phase: Option<f64>,
     pub started_at: Option<NaiveDateTime>,
@@ -172,16 +174,45 @@ pub struct EncounterStats {
     pub outgoing: DamageTotals,
     pub incoming: IncomingTotals,
     pub attacks: Vec<AttackStats>,
+    #[serde(default)]
+    pub timeline: Vec<TimelinePoint>,
     pub completed: bool,
+    #[serde(default)]
+    pub end_reason: String,
+    #[serde(default)]
+    pub boundary_confidence: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct RunSummary {
     pub id: String,
     pub session_id: Option<u32>,
+    /// Primary analysis window. When named boss windows are present, these timestamps and all
+    /// primary combat totals below describe boss combat only.
     pub started_at: Option<NaiveDateTime>,
     pub ended_at: Option<NaiveDateTime>,
     pub duration_seconds: f64,
+    #[serde(default)]
+    pub metrics_scope: String,
+    #[serde(default)]
+    pub boss_count: usize,
+    /// Complete visit observation retained for diagnostics and pre-boss accounting.
+    #[serde(default)]
+    pub observed_started_at: Option<NaiveDateTime>,
+    #[serde(default)]
+    pub observed_ended_at: Option<NaiveDateTime>,
+    #[serde(default)]
+    pub observed_duration_seconds: f64,
+    #[serde(default)]
+    pub observed_outgoing: DamageTotals,
+    #[serde(default)]
+    pub observed_incoming: IncomingTotals,
+    #[serde(default)]
+    pub pre_boss_duration_seconds: f64,
+    #[serde(default)]
+    pub pre_boss_outgoing: DamageTotals,
+    #[serde(default)]
+    pub pre_boss_incoming: IncomingTotals,
     pub class_names: Vec<String>,
     pub stages: Vec<String>,
     pub players: Vec<PlayerStats>,
@@ -200,6 +231,10 @@ pub struct RunSummary {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct TimelinePoint {
     pub timestamp: NaiveDateTime,
+    /// Combat-relative time for graphing. Combined boss-run timelines concatenate boss windows,
+    /// while encounter timelines start at zero. Older payloads omit this field.
+    #[serde(default)]
+    pub elapsed_seconds: Option<f64>,
     pub outgoing: f64,
     pub incoming: f64,
     pub rolling_dps: f64,

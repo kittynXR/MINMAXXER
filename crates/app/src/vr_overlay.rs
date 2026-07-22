@@ -1184,8 +1184,7 @@ fn render_frame(
         VrPlacementState::Placed => Some(("HUD PLACED - RELEASE BOTH GRIPS", CYAN)),
         _ => None,
     };
-    let focus_visible =
-        placement_banner.is_none() && settings.show_focus && snapshot.focus.is_some();
+    let focus_visible = placement_banner.is_none() && settings.show_focus;
     if !context.is_empty() {
         draw_text(
             font,
@@ -1205,24 +1204,23 @@ fn render_frame(
     }
     if let Some((message, color)) = placement_banner {
         draw_text_right(font, glyphs, pixels, message, 968, 101, 16, color, 342);
-    } else if let Some(focus) = snapshot.focus.as_ref().filter(|_| settings.show_focus) {
-        // Ecliptica exposes no authoritative hate table. Keep the question mark visible so this
-        // ownership-derived boss match can never be mistaken for confirmed aggro.
-        draw_text_right(
-            font,
-            glyphs,
-            pixels,
-            &format!(
-                "FOCUS? {}  |  {}",
+    } else if settings.show_focus {
+        // Ecliptica exposes no authoritative hate table. Keep the question mark and confidence
+        // visible so this ownership-derived boss match can never be mistaken for confirmed aggro.
+        let active_boss = snapshot.encounter.active && snapshot.encounter.kind == "boss";
+        let message = if !active_boss {
+            "BOSS TARGET? NO ACTIVE BOSS".to_owned()
+        } else if let Some(focus) = snapshot.focus.as_ref() {
+            format!(
+                "BOSS TARGET? {}  |  {}  |  {}",
                 focus.player,
+                focus.confidence.to_ascii_uppercase(),
                 format_age(focus.age_seconds)
-            ),
-            968,
-            101,
-            17,
-            ORANGE,
-            322,
-        );
+            )
+        } else {
+            "BOSS TARGET? ACQUIRING".to_owned()
+        };
+        draw_text_right(font, glyphs, pixels, &message, 968, 101, 17, ORANGE, 322);
     }
 
     let mut metrics: Vec<(&str, String, Color)> = Vec::with_capacity(3);
@@ -2152,6 +2150,73 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     #[test]
+    fn boss_target_placeholders_are_rendered_by_default() {
+        let mut renderer = HudRenderer::new().expect("Windows includes Segoe UI");
+        let mut settings = VrOverlaySettings {
+            show_status: false,
+            show_encounter: false,
+            show_focus: false,
+            ..VrOverlaySettings::default()
+        };
+        let mut snapshot = EngineSnapshot::default();
+
+        let hidden = renderer.render(&snapshot, &settings).to_vec();
+        settings.show_focus = true;
+        let no_boss = renderer.render(&snapshot, &settings).to_vec();
+        assert!(changed_pixels_in_focus_row(&hidden, &no_boss) > 0);
+
+        snapshot.encounter = minmaxxer_core::aggregate::LiveEncounter {
+            name: "Astral Sovereign".to_owned(),
+            kind: "boss".to_owned(),
+            active: true,
+            ..minmaxxer_core::aggregate::LiveEncounter::default()
+        };
+        let acquiring = renderer.render(&snapshot, &settings).to_vec();
+        assert!(changed_pixels_in_focus_row(&no_boss, &acquiring) > 0);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn inferred_boss_target_signal_changes_the_native_hud_pixels() {
+        let time = NaiveDate::from_ymd_opt(2026, 7, 21)
+            .unwrap()
+            .and_hms_opt(20, 0, 0)
+            .unwrap();
+        let settings = VrOverlaySettings {
+            show_status: false,
+            show_encounter: false,
+            ..VrOverlaySettings::default()
+        };
+        let mut snapshot = EngineSnapshot {
+            encounter: minmaxxer_core::aggregate::LiveEncounter {
+                name: "Astral Sovereign".to_owned(),
+                kind: "boss".to_owned(),
+                active: true,
+                ..minmaxxer_core::aggregate::LiveEncounter::default()
+            },
+            ..EngineSnapshot::default()
+        };
+        let mut renderer = HudRenderer::new().expect("Windows includes Segoe UI");
+        let acquiring = renderer.render(&snapshot, &settings).to_vec();
+
+        snapshot.focus = Some(minmaxxer_core::aggregate::FocusSignal {
+            player: "Mirai".to_owned(),
+            entity: "Astral Sovereign".to_owned(),
+            observed_at: time,
+            age_seconds: 2.4,
+            confidence: "inferred".to_owned(),
+            evidence: "boss_network_ownership".to_owned(),
+            corroborating_hits: 0,
+            corroborated_at: None,
+            source_note: "Network-ownership signal; not authoritative hate.".to_owned(),
+        });
+        let signal = renderer.render(&snapshot, &settings).to_vec();
+
+        assert!(changed_pixels_in_focus_row(&acquiring, &signal) > 0);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
     fn controller_placement_state_adds_native_hud_feedback() {
         let mut renderer = HudRenderer::new().expect("Windows includes Segoe UI");
         let snapshot = EngineSnapshot::default();
@@ -2199,6 +2264,14 @@ mod tests {
             controllers_available: true,
             right_pose_available,
         }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn changed_pixels_in_focus_row(left: &[u8], right: &[u8]) -> usize {
+        (75..110)
+            .flat_map(|y| (620..980).map(move |x| (y * HUD_TEXTURE_WIDTH + x) * 4))
+            .filter(|index| left[*index..*index + 4] != right[*index..*index + 4])
+            .count()
     }
 
     fn assert_transform_close(left: RigidTransform, right: RigidTransform) {

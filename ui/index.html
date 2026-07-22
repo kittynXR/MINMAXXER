@@ -1,0 +1,332 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#080b11">
+  <meta name="description" content="MINMAXXER — a lightweight Ecliptica combat analyzer for VRChat.">
+  <title>MINMAXXER // Ecliptica Combat Analysis</title>
+  <style>html,body{background:#05070b;color-scheme:dark}</style>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <a class="skip-link" href="#mainContent">Skip to combat data</a>
+
+  <div id="appShell" class="app-shell">
+    <aside class="sidebar" id="sidebar" aria-label="Primary navigation">
+      <div class="brand" aria-label="MINMAXXER home">
+        <div class="brand-mark" aria-hidden="true"><span>M</span><i></i></div>
+        <div>
+          <strong>MINMAXXER</strong>
+          <small>ECLIPTICA // LAB</small>
+        </div>
+      </div>
+
+      <div class="source-state" id="sourceState">
+        <span class="status-dot" aria-hidden="true"></span>
+        <div><strong>Watching VRChat</strong><small id="sourceDetail">Connecting to parser…</small></div>
+      </div>
+
+      <nav class="nav-stack">
+        <span class="nav-label">Now</span>
+        <button class="nav-item active" data-view="live" aria-current="page">
+          <span class="nav-glyph live-glyph" aria-hidden="true"></span><span>Live encounter</span><kbd>L</kbd>
+        </button>
+
+        <span class="nav-label">Review</span>
+        <button class="nav-item" data-view="runs"><span class="nav-glyph history-glyph" aria-hidden="true"></span><span>Run history</span><kbd>R</kbd></button>
+        <button class="nav-item" data-view="compare"><span class="nav-glyph compare-glyph" aria-hidden="true"></span><span>Compare</span><kbd>C</kbd></button>
+        <button class="nav-item" data-view="analysis"><span class="nav-glyph analysis-glyph" aria-hidden="true"></span><span>Deep analysis</span><kbd>A</kbd></button>
+        <button class="nav-item" data-view="events"><span class="nav-glyph events-glyph" aria-hidden="true"></span><span>Event explorer</span><kbd>E</kbd></button>
+
+        <span class="nav-label">Output</span>
+        <button class="nav-item" data-view="overlay"><span class="nav-glyph overlay-glyph" aria-hidden="true"></span><span>Overlay studio</span><kbd>O</kbd></button>
+      </nav>
+
+      <div class="sidebar-footer">
+        <button class="ghost-button full" id="settingsButton"><span aria-hidden="true">⚙</span> Settings</button>
+        <div class="build-line"><span id="eventRate">0 evt/s</span><span>local-first</span></div>
+      </div>
+    </aside>
+
+    <div class="workspace">
+      <header class="topbar">
+        <button class="icon-button menu-button" id="menuButton" aria-label="Toggle navigation" aria-expanded="false">☰</button>
+        <div class="route-title">
+          <span>ANALYZER</span><i>/</i><strong id="routeTitle">LIVE ENCOUNTER</strong>
+        </div>
+        <div class="topbar-actions">
+          <div class="mini-status" id="healthStatus" title="Local service status"><span></span> API</div>
+          <button class="ghost-button" id="freezeButton" aria-pressed="false"><span class="pause-icon" aria-hidden="true"></span><span class="button-label">Freeze</span></button>
+          <button class="primary-button" id="importButton"><span aria-hidden="true">＋</span><span class="button-label">Import log</span></button>
+          <input type="file" id="importInput" accept=".txt,.log,.json" hidden>
+        </div>
+      </header>
+
+      <main id="mainContent" class="main-content" tabindex="-1">
+        <section class="app-view active" data-page="live" aria-labelledby="liveTitle">
+          <div class="encounter-hero panel">
+            <div class="encounter-identity">
+              <div class="encounter-icon" aria-hidden="true"><span>EX</span></div>
+              <div>
+                <div class="eyebrow"><span class="live-badge">LIVE</span><span id="encounterZone">Waiting for local snapshot</span></div>
+                <h1 id="liveTitle"><span id="encounterName">Connecting…</span><small id="encounterPhase">No combat data loaded</small></h1>
+              </div>
+            </div>
+            <div class="boss-vitals">
+              <div class="boss-meta"><span>ENEMY VITALITY</span><strong id="bossHpText">—</strong></div>
+              <div class="boss-bar"><i id="bossHpBar" style="width:0"></i><b id="bossShieldBar" style="width:0"></b></div>
+              <div class="boss-sub"><span id="bossHpValue">Not loaded</span><span id="encounterTimer">00:00.0</span></div>
+              <div class="focus-widget" id="focusWidget" title="Inferred from network ownership; not authoritative hate" hidden><small>FOCUS?</small><strong>—</strong><em>—</em></div>
+            </div>
+            <div class="hero-control">
+              <span>RUN <b id="runNumber">—</b></span>
+            </div>
+          </div>
+
+          <div class="metric-grid" id="metricGrid">
+            <article class="metric-card accent-cyan">
+              <div class="metric-label"><span>LOCAL DPS</span><i title="Damage per second from this client's Ecliptica log">?</i></div>
+              <strong id="partyDps">—</strong>
+              <small id="partyDpsDetail"><b id="partyDpsDelta">Waiting</b> for log data</small>
+              <div class="spark-bars" id="dpsSpark" aria-hidden="true"></div>
+            </article>
+            <article class="metric-card accent-mint">
+              <div class="metric-label"><span>HEALING</span><i title="Ecliptica logs reviewed so far do not expose reliable healing values">?</i></div>
+              <strong id="partyHps">—</strong>
+              <small id="healingDetail"><b>Waiting</b> for log data</small>
+              <div class="spark-bars" id="hpsSpark" aria-hidden="true"></div>
+            </article>
+            <article class="metric-card accent-violet">
+              <div class="metric-label"><span>DAMAGE IN</span><i title="Incoming damage per second">?</i></div>
+              <strong id="damageIn">—</strong>
+              <small id="damageInDetail"><b id="avoidableDamage">Waiting</b> for log data</small>
+              <div class="spark-bars" id="inSpark" aria-hidden="true"></div>
+            </article>
+            <article class="metric-card accent-amber">
+              <div class="metric-label"><span>STRIKE SHARE</span><i title="Strike damage divided by total outgoing damage">?</i></div>
+              <strong id="critRate">—</strong>
+              <small id="critDetail"><b>Waiting</b> for log data</small>
+              <div class="spark-bars" id="critSpark" aria-hidden="true"></div>
+            </article>
+            <article class="metric-card accent-rose">
+              <div class="metric-label"><span>DEBUFF UPTIME</span><i title="Combined priority debuff uptime">?</i></div>
+              <strong id="debuffUptime">—</strong>
+              <small id="debuffDetail"><b>Waiting</b> for log data</small>
+              <div class="spark-bars" id="debuffSpark" aria-hidden="true"></div>
+            </article>
+          </div>
+
+          <div class="live-grid">
+            <article class="panel chart-panel span-2">
+              <header class="panel-header">
+                <div><span class="eyebrow">OUTPUT VELOCITY</span><h2>Local damage timeline</h2></div>
+                <div class="segmented chart-range" role="group" aria-label="Chart time range">
+                  <button data-range="30">30s</button><button class="active" data-range="all">All</button>
+                </div>
+              </header>
+              <div class="chart-legend" id="timelineLegend"></div>
+              <div class="canvas-wrap"><canvas id="liveChart" role="img" aria-label="Local damage over the current encounter"></canvas><div class="chart-crosshair" id="chartTooltip" hidden></div></div>
+            </article>
+
+            <article class="panel mechanics-panel">
+              <header class="panel-header"><div><span class="eyebrow">MECHANIC WINDOW</span><h2>Effects & warnings</h2></div><span class="tiny-counter" id="effectCount">6 ACTIVE</span></header>
+              <div class="effect-list" id="effectList"></div>
+            </article>
+
+            <article class="panel party-panel span-2">
+              <header class="panel-header">
+                <div><span class="eyebrow">ATTRIBUTED LOG</span><h2>Observed player</h2></div>
+                <div class="table-mode" role="group" aria-label="Observed player metric"><button class="active" data-party-metric="dps">DPS</button><button data-party-metric="damage">DMG</button><button data-party-metric="incoming">IN</button></div>
+              </header>
+              <div class="data-table-wrap">
+                <table class="data-table party-table">
+                  <thead><tr><th>#</th><th>Player</th><th>Role</th><th class="numeric">DPS</th><th class="numeric">Damage</th><th class="numeric">Strike</th><th class="numeric">Active</th><th>Share</th></tr></thead>
+                  <tbody id="partyTableBody"></tbody>
+                </table>
+              </div>
+            </article>
+
+            <article class="panel feed-panel">
+              <header class="panel-header"><div><span class="eyebrow">OUTGOING HIT FEED</span><h2>Previous hits</h2></div><button class="text-button" data-jump="events">Explore all</button></header>
+              <div class="event-feed" id="eventFeed"></div>
+            </article>
+          </div>
+        </section>
+
+        <section class="app-view" data-page="runs" aria-labelledby="runsTitle">
+          <div class="page-heading">
+            <div><span class="eyebrow">SESSION ARCHIVE</span><h1 id="runsTitle">Run history</h1><p>Every encounter, automatically grouped and ready for review.</p></div>
+            <div class="heading-tools"><label class="search-field"><span aria-hidden="true">⌕</span><input id="runSearch" type="search" placeholder="Search player or encounter" aria-label="Search run history"></label><button class="ghost-button" id="exportRunsButton">Export CSV</button></div>
+          </div>
+          <div class="summary-strip" id="runSummaryStrip"></div>
+          <div class="history-layout">
+            <article class="panel run-list-panel">
+              <div class="filter-row">
+                <div class="filter-chips" role="group" aria-label="Run close-marker filter"><button class="active" data-run-filter="all">All runs</button><button data-run-filter="closed">Close marker</button><button data-run-filter="ongoing">No close marker</button></div>
+                <select id="runSort" aria-label="Sort run history"><option value="recent">Most recent</option><option value="dps">Highest DPS</option><option value="duration">Fastest</option></select>
+              </div>
+              <div id="runList" class="run-list"></div>
+            </article>
+            <aside class="panel run-inspector" id="runInspector" aria-label="Selected run details"></aside>
+          </div>
+        </section>
+
+        <section class="app-view" data-page="compare" aria-labelledby="compareTitle">
+          <div class="page-heading">
+            <div><span class="eyebrow">A / B REVIEW</span><h1 id="compareTitle">Compare runs</h1><p>Find the rotation, uptime, and mechanic choices that changed the outcome.</p></div>
+          </div>
+          <div class="compare-picker panel">
+            <label><span>BASELINE RUN</span><select id="compareA"></select></label>
+            <div class="versus-mark">VS</div>
+            <label><span>COMPARISON RUN</span><select id="compareB"></select></label>
+          </div>
+          <div class="compare-summary" id="compareSummary"></div>
+          <div class="compare-layout">
+            <article class="panel chart-panel">
+              <header class="panel-header"><div><span class="eyebrow">NORMALIZED OUTPUT</span><h2>Damage curve</h2></div><span class="unit-label">DPS / elapsed %</span></header>
+              <div class="chart-legend" id="compareLegend"></div>
+              <div class="canvas-wrap compare-canvas"><canvas id="compareChart" role="img" aria-label="Damage curves for two selected runs"></canvas></div>
+            </article>
+            <article class="panel compare-table-panel">
+              <header class="panel-header"><div><span class="eyebrow">METRIC DELTA</span><h2>What changed</h2></div></header>
+              <div id="compareTable"></div>
+            </article>
+          </div>
+          <article class="panel player-delta-panel">
+            <header class="panel-header"><div><span class="eyebrow">PLAYER DELTA</span><h2>Contribution comparison</h2></div><span class="unit-label">COMPARISON − BASELINE</span></header>
+            <div class="data-table-wrap"><table class="data-table"><thead><tr><th>Player</th><th class="numeric">Run A</th><th class="numeric">Run B</th><th class="numeric">Change</th><th>Impact</th></tr></thead><tbody id="playerDeltaBody"></tbody></table></div>
+          </article>
+        </section>
+
+        <section class="app-view" data-page="analysis" aria-labelledby="analysisTitle">
+          <div class="page-heading analysis-heading">
+            <div><span class="eyebrow">POST-RUN LAB</span><h1 id="analysisTitle">Deep analysis</h1><p>Inspect players, attacks, enemy pressure, and mechanic uptime.</p></div>
+            <div class="analysis-selectors">
+              <label class="run-selector"><span>ANALYZING RUN</span><select id="analysisRunSelect"></select></label>
+              <label class="run-selector" id="analysisPlayerControl"><span>PLAYER LOG</span><select id="analysisPlayerSelect"></select></label>
+            </div>
+          </div>
+          <nav class="analysis-tabs" aria-label="Analysis breakdowns">
+            <button class="active" data-analysis-tab="players">Players</button>
+            <button data-analysis-tab="encounter">Encounter</button>
+            <button data-analysis-tab="attacks">Damage categories</button>
+            <button data-analysis-tab="incoming">Incoming damage</button>
+          </nav>
+          <div id="analysisContent"></div>
+        </section>
+
+        <section class="app-view" data-page="events" aria-labelledby="eventsTitle">
+          <div class="page-heading">
+            <div><span class="eyebrow">LOG LENS</span><h1 id="eventsTitle">Event explorer</h1><p>Search normalized combat events without losing the original log context.</p></div>
+            <label class="run-selector"><span>RUN</span><select id="eventRunSelect"></select></label>
+          </div>
+          <div class="event-toolbar panel">
+            <label class="search-field wide"><span aria-hidden="true">⌕</span><input id="eventSearch" type="search" placeholder="Search actor, target, attack, buff…" aria-label="Search combat events"></label>
+            <select id="eventTypeFilter" aria-label="Filter event type"><option value="all">All types</option><option value="damage">Damage</option><option value="heal">Healing</option><option value="buff">Buffs</option><option value="debuff">Debuffs</option><option value="death">Deaths</option><option value="system">System</option></select>
+            <label class="toggle-label"><input type="checkbox" id="strikeOnly"><span></span> Strike only</label>
+            <button class="ghost-button" id="copyEventsButton">Copy visible</button>
+          </div>
+          <div class="event-statline" id="eventStatline"></div>
+          <article class="panel raw-events-panel">
+            <div class="data-table-wrap"><table class="data-table event-table"><thead><tr><th>Time</th><th>Type</th><th>Source</th><th>Action / effect</th><th>Target</th><th class="numeric">Amount</th><th>Flags</th></tr></thead><tbody id="eventTableBody"></tbody></table></div>
+            <button class="load-more" id="loadMoreEvents">Show more events</button>
+          </article>
+        </section>
+
+        <section class="app-view" data-page="overlay" aria-labelledby="overlayTitle">
+          <div class="page-heading">
+            <div><span class="eyebrow">OUTPUT CONTROL</span><h1 id="overlayTitle">Overlay studio</h1><p>One live data source, tuned independently for OBS, desktop, and VR.</p></div>
+            <div class="output-live"><span></span> PREVIEW LIVE</div>
+          </div>
+          <div class="overlay-studio">
+            <div class="overlay-controls">
+              <article class="panel control-section">
+                <header><span class="step-index">01</span><div><h2>Choose a profile</h2><p>Profiles save display preferences, not combat data.</p></div></header>
+                <div class="profile-grid" id="profileGrid">
+                  <button class="profile-card active" data-profile="broadcast"><i class="profile-preview broadcast-preview"></i><strong>Broadcast</strong><small>Detailed observed-player table</small></button>
+                  <button class="profile-card" data-profile="minimal"><i class="profile-preview minimal-preview"></i><strong>Minimal</strong><small>Numbers only</small></button>
+                  <button class="profile-card" data-profile="vr"><i class="profile-preview vr-preview"></i><strong>VR glance</strong><small>Large & readable</small></button>
+                </div>
+              </article>
+
+              <article class="panel control-section">
+                <header><span class="step-index">02</span><div><h2>Style & content</h2><p>Changes are reflected in the preview immediately.</p></div></header>
+                <div class="control-grid">
+                  <label><span>Layout</span><select id="overlayLayout"><option value="leaderboard">Leaderboard</option><option value="compact">Compact rows</option><option value="ticker">Horizontal ticker</option><option value="hits">Ultra-compact hits</option></select></label>
+                  <label><span>Theme</span><select id="overlayTheme"><option value="void">OLED void</option><option value="glass">Dark glass</option></select></label>
+                  <label><span>Rows <output id="overlayRowsValue">5</output></span><input type="range" id="overlayRows" min="1" max="8" value="5"></label>
+                  <label><span>Hit rows <output id="overlayHitRowsValue">4</output></span><input type="range" id="overlayHitRows" min="1" max="8" value="4"></label>
+                  <label><span>Scale <output id="overlayScaleValue">100%</output></span><input type="range" id="overlayScale" min="70" max="160" step="5" value="100"></label>
+                  <fieldset><legend>Accent</legend><div class="color-options" id="accentOptions"><button class="active" data-accent="cyan" style="--swatch:#54e6ff" aria-label="Cyan"></button><button data-accent="mint" style="--swatch:#65f2b8" aria-label="Mint"></button><button data-accent="violet" style="--swatch:#ad8cff" aria-label="Violet"></button><button data-accent="amber" style="--swatch:#ffc45c" aria-label="Amber"></button><button data-accent="rose" style="--swatch:#ff719a" aria-label="Rose"></button></div></fieldset>
+                  <label class="bg-control"><span>Background <output id="overlayBgValue">78%</output></span><input type="range" id="overlayBg" min="0" max="100" value="78"></label>
+                </div>
+                <fieldset class="show-options"><legend>Visible data</legend><label><input type="checkbox" value="dps" checked><span></span>DPS</label><label><input type="checkbox" value="damage" checked><span></span>Total damage</label><label><input type="checkbox" value="incoming"><span></span>Incoming</label><label><input type="checkbox" value="encounter" checked><span></span>Encounter</label><label><input type="checkbox" value="hits" checked><span></span>Recent hits</label><label><input type="checkbox" value="focus" checked><span></span>Boss focus?</label></fieldset>
+              </article>
+
+              <article class="panel control-section output-section">
+                <header><span class="step-index">03</span><div><h2>Send it somewhere</h2><p>Each output can use its own profile and position.</p></div></header>
+                <div class="output-cards">
+                  <div class="output-card obs-card"><div class="output-icon">OBS</div><div><strong>OBS browser source</strong><small>Transparent web output · recommended 720 × 480</small></div><span class="ready-pill">READY</span></div>
+                  <div class="url-copy"><input id="obsUrl" readonly aria-label="OBS browser source URL"><button id="copyObsUrl">Copy URL</button></div>
+                  <div class="output-card"><div class="output-icon desktop-icon">▣</div><div><strong>Desktop overlay</strong><small>Click-through layer above VRChat while in desktop mode</small></div><button class="switch" id="desktopOverlayToggle" role="switch" aria-checked="false"><i></i></button></div>
+                  <div class="grab-control"><div><strong>Show desktop HUD with a detected headset</strong><small>Enable this if a connected but idle headset would otherwise hide the desktop overlay.</small></div><button class="switch" id="desktopHeadsetToggle" type="button" role="switch" aria-checked="false" aria-label="Show desktop overlay when a headset is detected"><i></i></button></div>
+                  <div class="output-card"><div class="output-icon vr-icon">VR</div><div><strong>VR overlay</strong><small id="vrOverlayStatus">OpenVR panel with saved coordinates or optional controller placement</small></div><button class="switch" id="vrOverlayToggle" role="switch" aria-checked="false"><i></i></button></div>
+                  <div class="vr-placement" id="vrPlacementControls">
+                    <div class="placement-heading"><div><strong>VR placement</strong><small>Head-relative metres · saved immediately when applied</small></div><span>POSITION</span></div>
+                    <div class="placement-grid">
+                      <label><span>X</span><input id="vrX" type="number" min="-3" max="3" step="0.01" value="0.30"></label>
+                      <label><span>Y</span><input id="vrY" type="number" min="-3" max="3" step="0.01" value="0.08"></label>
+                      <label><span>Z</span><input id="vrZ" type="number" min="-5" max="-0.1" step="0.01" value="-1.05"></label>
+                      <label><span>Width m</span><input id="vrWidth" type="number" min="0.2" max="3" step="0.01" value="0.78"></label>
+                      <label><span>Opacity</span><input id="vrOpacity" type="number" min="0.1" max="1" step="0.01" value="0.92"></label>
+                    </div>
+                    <div class="grab-control">
+                      <div><strong>Controller grab placement</strong><small>Hold both grips for 0.9s to attach it to the right controller; release the right grip to freeze it for this VR session. Grabbed placement does not overwrite the saved coordinates above.</small></div>
+                      <button class="switch" id="vrGrabToggle" type="button" role="switch" aria-checked="false" aria-label="Enable VR controller grab placement"><i></i></button>
+                    </div>
+                    <div class="placement-actions"><small>Negative Z places the panel in front of your view.</small><button class="ghost-button" id="resetVrPlacement" type="button">Reset</button><button class="primary-button" id="saveVrPlacement" type="button">Apply VR settings</button></div>
+                  </div>
+                </div>
+              </article>
+
+              <aside class="capability-note">
+                <span aria-hidden="true">i</span><p><strong>Honest about the log.</strong> MINMAXXER can only report events Ecliptica writes to the VRChat log. Absorbs, positions, and effect ownership may be unavailable. “Focus?” is inferred from boss network ownership and is never an authoritative hate or threat reading.</p>
+              </aside>
+            </div>
+
+            <div class="preview-column">
+              <div class="preview-toolbar"><span>LIVE OUTPUT PREVIEW</span><div><button id="previewFit" class="active">Fit</button><button id="previewOneToOne">1:1</button></div></div>
+              <div class="overlay-stage" id="overlayStage">
+                <div id="studioOverlayPreview" class="embedded-overlay"></div>
+                <span class="stage-size">720 × 480</span>
+              </div>
+              <div class="preview-hints"><span><i></i> Transparency grid is preview-only</span><span>OBS refreshes automatically</span></div>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+  </div>
+
+  <div id="overlayRoot" class="overlay-root" aria-live="polite"></div>
+
+  <dialog id="settingsDialog" class="settings-dialog">
+    <form method="dialog">
+      <header><div><span class="eyebrow">LOCAL CONFIGURATION</span><h2>Settings</h2></div><button class="icon-button" value="cancel" aria-label="Close settings">×</button></header>
+      <div class="settings-body">
+        <label><span>VRChat log folder</span><div class="path-input"><input id="logPath" placeholder="Auto-detect from VRChat"><button type="button" id="detectLogButton">Auto-detect</button></div><small>New output_log files are selected automatically.</small></label>
+        <label><span>Recent-log import window</span><input id="importDays" type="number" min="1" max="30" step="1" value="3"><small>How many previous days are scanned when automatic importing is enabled.</small></label>
+        <label class="toggle-row"><div><span>Automatically import recent logs</span><small>Scans the configured VRChat folder on startup.</small></div><button type="button" class="switch active" id="autoImportToggle" role="switch" aria-checked="true"><i></i></button></label>
+        <label class="toggle-row"><div><span>Launch minimized</span><small>Start in the background with overlays still available.</small></div><button type="button" class="switch" id="launchMinimizedToggle" role="switch" aria-checked="false"><i></i></button></label>
+        <label class="toggle-row"><div><span>Minimize to tray</span><small>Keep log monitoring active when the main window closes.</small></div><button type="button" class="switch active" id="minimizeTrayToggle" role="switch" aria-checked="true"><i></i></button></label>
+      </div>
+      <footer><span id="settingsStatus"></span><button value="cancel" class="ghost-button">Cancel</button><button type="button" id="saveSettings" class="primary-button">Save settings</button></footer>
+    </form>
+  </dialog>
+
+  <div class="toast-region" id="toastRegion" aria-live="polite" aria-atomic="true"></div>
+  <script src="/app.js" defer></script>
+</body>
+</html>

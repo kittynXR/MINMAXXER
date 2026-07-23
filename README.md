@@ -34,13 +34,13 @@ Add a **Browser** source and use:
 http://127.0.0.1:49321/overlay
 ```
 
-Use a transparent source around 720 × 480, then customize the URL from Overlay studio. A hit-feed-only source can use:
+Use a transparent source around 720 × 480. In OBS's URL field, press **Ctrl+A before pasting** so the MINMAXXER address replaces the entire default `https://obsproject.com/browser-source` value instead of being appended to it. Then customize the URL from Overlay studio. A hit-feed-only source can use:
 
 ```text
 http://127.0.0.1:49321/overlay?layout=hits&hit_rows=6
 ```
 
-The server and collector keep running when the main window is minimized to the tray.
+Keep MINMAXXER running while OBS uses the source; the server and collector continue running when the main window is minimized to the tray. With no active VRChat log, the source shows a compact `MINMAXXER READY · NO LIVE ECLIPTICA INSTANCE` card. If the service connection is lost after the page loads, it switches to a reconnecting card instead of showing demo or stale combat values.
 
 ### Desktop overlay
 
@@ -80,6 +80,6 @@ cargo build --release -p minmaxxer
 ./scripts/build-portable.ps1
 ```
 
-The normal executable is written to `target\release\minmaxxer.exe`. The portable release script uses a clean isolated target, statically links the MSVC runtime, strips local build paths, and writes `dist\MINMAXXER-v0.2.0-windows-x64.exe`. Run the local server without the desktop WebView with `minmaxxer.exe --headless`.
+The normal executable is written to `target\release\minmaxxer.exe`. The portable release script uses a clean isolated target, statically links the MSVC runtime, strips local build paths, and writes `dist\MINMAXXER-v0.2.1-windows-x64.exe`. Run the local server without the desktop WebView with `minmaxxer.exe --headless`.
 
 The code is split into a dependency-light parser/analytics crate and a Windows app crate. More detail is in [Architecture](docs/ARCHITECTURE.md).

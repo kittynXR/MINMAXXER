@@ -56,6 +56,8 @@ pub struct FocusSignal {
 pub struct EngineSnapshot {
     pub version: u64,
     pub connected: bool,
+    #[serde(default)]
+    pub in_world: bool,
     pub status: String,
     pub observed_player: Option<String>,
     pub session_id: Option<u32>,
@@ -85,6 +87,7 @@ impl Default for EngineSnapshot {
         Self {
             version: 0,
             connected: false,
+            in_world: false,
             status: "Waiting for VRChat".to_owned(),
             observed_player: None,
             session_id: None,
@@ -396,6 +399,7 @@ impl CombatEngine {
         EngineSnapshot {
             version: self.version,
             connected: self.connected,
+            in_world: self.in_world,
             status: if !self.connected {
                 "Waiting for a VRChat log".to_owned()
             } else if !self.in_world {
@@ -1930,6 +1934,7 @@ mod tests {
         let entered = visit_event(3, EventKind::WorldEntered, None);
         engine.ingest(entered);
         let entered_snapshot = engine.snapshot();
+        assert!(entered_snapshot.in_world);
         assert_eq!(entered_snapshot.session_id, None);
         assert_eq!(entered_snapshot.stage, None);
         assert_eq!(entered_snapshot.class_name, None);
@@ -1953,6 +1958,7 @@ mod tests {
 
         engine.ingest(event(7, EventKind::WorldExited, 0.0));
         let exited = engine.snapshot();
+        assert!(!exited.in_world);
         assert_eq!(exited.world, None);
         assert_eq!(exited.session_id, None);
         assert!(exited.roster.is_empty());

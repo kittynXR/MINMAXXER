@@ -47,7 +47,9 @@
     archiveBootstrapRetryTimer: null,
     archiveStreamPrimed: false,
     archiveMeaningfulPrimed: false,
-    archiveOpenPrimed: false
+    archiveOpenPrimed: false,
+    overlayServiceState: "ready",
+    overlayStreamLossTimer: null
   };
   const overlayHitMemory = new WeakMap();
 
@@ -82,6 +84,7 @@
     return {
       version: 1,
       connected: true,
+      inWorld: true,
       status: "watching",
       observedPlayer: "Aster",
       sessionId: "ECL-7B42-0482",
@@ -339,7 +342,7 @@
     return {
       ...fallback, ...src,
       version: src.version ?? fallback.version,
-      connected: Boolean(src.connected ?? true), status: String(src.status ?? "watching"), observedPlayer: String(observed ?? ""),
+      connected: Boolean(src.connected ?? true), inWorld: Boolean(src.in_world ?? src.inWorld ?? (src.version === undefined ? fallback.inWorld : false)), status: String(src.status ?? "watching"), observedPlayer: String(observed ?? ""),
       sessionId: String(src.session_id ?? src.sessionId ?? (src.version !== undefined ? "—" : fallback.sessionId)), world: String(src.world ?? (src.version !== undefined ? "Waiting for Ecliptica" : fallback.world)), stage: String(src.stage ?? (src.version !== undefined ? "No stage detected" : fallback.stage)),
       className: String(src.class_name ?? src.className ?? (src.version !== undefined ? "Unknown class" : fallback.className)), sourceFile: String(src.source_file ?? src.sourceFile ?? (src.version !== undefined ? "No active log file" : fallback.sourceFile)),
       encounter: {
@@ -380,6 +383,21 @@
       capabilityNote: String(src.capability_note ?? src.capabilityNote ?? fallback.capabilityNote),
       lastEventAt: src.last_event_at ?? src.lastEventAt ?? null
     };
+  }
+
+  function makeOverlayWaitingLive(serviceAvailable = false) {
+    return normalizeLive({
+      version: 2,
+      connected: false,
+      in_world: false,
+      status: serviceAvailable ? "Waiting for a VRChat log" : "Local service unavailable",
+      session_id: "—",
+      world: "Waiting for Ecliptica",
+      stage: "No stage detected",
+      source_file: "No active log file",
+      encounter: { name: "No active encounter", kind: "waiting", phase: "Awaiting phase", duration_seconds: 0, active: false },
+      players: [], attacks: [], timeline: [], effects: [], recent_events: [], recent_hits: [], outgoing: {}, incoming: {}
+    }, makeMockLive());
   }
 
   function weightedAverage(items, valueKey, weightKey) {
@@ -571,21 +589,23 @@
     }, 4000);
   }
 
-  function connectStream(onLive, { refreshArchive = false } = {}) {
+  function connectStream(onLive, { refreshArchive = false, onStreamState = null } = {}) {
     if (!("EventSource" in window)) return;
     const stream = new EventSource("/api/stream");
     stream.addEventListener("open", () => {
       state.streamOnline = true; state.apiOnline = true; updateConnectionUI();
+      if (typeof onStreamState === "function") onStreamState("open");
       if (refreshArchive && !state.archiveOpenPrimed) {
         state.archiveOpenPrimed = true;
         scheduleArchiveRefresh();
         scheduleArchiveBootstrapRetry();
       }
     });
-    stream.addEventListener("error", () => { state.streamOnline = false; updateConnectionUI(); });
+    stream.addEventListener("error", () => { state.streamOnline = false; updateConnectionUI(); if (typeof onStreamState === "function") onStreamState("error"); });
     stream.addEventListener("message", (message) => {
       try {
         const payload = JSON.parse(message.data);
+        if (typeof onStreamState === "function") onStreamState("message");
         state.eventCounter += 1;
         const kind = String(payload.type ?? payload.kind ?? "").toLowerCase();
         const data = payload.data ?? payload.snapshot ?? payload;
@@ -1165,7 +1185,7 @@
       accent: ACCENTS[params.get("accent")] ? params.get("accent") : "cyan",
       rows: clamp(Math.round(number(params.get("rows") ?? 5, 5)), 1, 8),
       hitRows: clamp(Math.round(number(params.get("hit_rows") ?? params.get("hitRows") ?? 4, 4)), 1, 8), show: parsedShow,
-      bg: clamp(number(params.get("bg") ?? 78, 78), 0, 100), scale: clamp(number(params.get("scale") ?? 100, 100), 70, 160)
+      bg: clamp(number(params.get("bg") ?? 78, 78), 0, 100), scale: clamp(number(params.get("scale") ?? 100, 100), 70, 160), statusCards: true
     };
   }
 
@@ -1178,6 +1198,17 @@
   function renderCombatOverlay(root, live, options) {
     if (!root || !live) return;
     const accent = ACCENTS[options.accent] || ACCENTS.cyan;
+    const status = options.statusCards && state.overlayServiceState === "connecting"
+      ? { tone: "connecting", eyebrow: "MINMAXXER", title: "CONNECTING TO LOCAL SERVICE", detail: "Waiting for the local HUD service…", badge: "CONNECTING" }
+      : options.statusCards && state.overlayServiceState === "lost"
+        ? { tone: "lost", eyebrow: "MINMAXXER OFFLINE", title: "LOCAL SERVICE DISCONNECTED", detail: "Start MINMAXXER, then refresh this Browser Source if it does not reconnect.", badge: "RECONNECTING" }
+        : options.statusCards && (!live.connected || !live.inWorld)
+          ? { tone: "ready", eyebrow: "MINMAXXER READY", title: "NO LIVE ECLIPTICA INSTANCE", detail: "Join Ecliptica in VRChat. This overlay will update automatically.", badge: "WAITING FOR VRCHAT" }
+          : null;
+    if (status) {
+      root.innerHTML = `<section class="combat-overlay overlay-status-card status-${status.tone} profile-${options.profile} layout-${options.layout} theme-${options.theme}" style="--overlay-accent:${accent[0]};--overlay-accent-rgb:${accent[1]};--overlay-opacity:${options.bg/100};--overlay-scale:${options.scale/100}" aria-label="MINMAXXER overlay status"><header class="overlay-head"><div class="overlay-brand"><span class="overlay-logo">MX</span><div class="overlay-title"><strong>MINMAXXER</strong><span>LOCAL OBS HUD</span></div></div><div class="overlay-status-badge"><i></i>${escapeHtml(status.badge)}</div></header><div class="overlay-status-body"><span>${escapeHtml(status.eyebrow)}</span><strong>${escapeHtml(status.title)}</strong><p>${escapeHtml(status.detail)}</p></div><footer class="overlay-foot"><span class="live-dot"><i></i>${escapeHtml(status.badge)}</span><span>127.0.0.1 // PRIVATE</span></footer></section>`;
+      return;
+    }
     const displayDuration = live.encounter.duration + (live.encounter.active && !state.usingMock && state.lastLiveAt ? Math.max(0, (Date.now() - state.lastLiveAt) / 1000) : 0);
     const metrics = ["dps", "damage", "incoming"].filter((metric) => options.show.includes(metric));
     if (!metrics.length) metrics.push("dps");
@@ -1245,7 +1276,7 @@
   function renderStudioPreview(persist = false) {
     if (!$("#studioOverlayPreview") || !state.live) return; const options = readStudioOptions(); state.overlay = options;
     text("#overlayRowsValue", options.rows); text("#overlayHitRowsValue", options.hitRows); text("#overlayScaleValue", `${options.scale}%`); text("#overlayBgValue", `${options.bg}%`);
-    $("#obsUrl").value = overlayUrl(options); renderCombatOverlay($("#studioOverlayPreview"), state.live, { ...options, scale: 100 });
+    $("#obsUrl").value = overlayUrl(options); renderCombatOverlay($("#studioOverlayPreview"), state.live, { ...options, scale: 100, statusCards: false });
     try { localStorage.setItem("minmaxxer.overlay", JSON.stringify(options)); } catch (_) { /* Storage is optional. */ }
     renderVrStatus();
     if (persist) queueOverlayProfileSave(options);
@@ -1301,7 +1332,7 @@
     $$(".profile-card").forEach((button) => button.addEventListener("click", () => { $$(".profile-card").forEach((b) => b.classList.toggle("active", b === button)); renderStudioPreview(true); }));
     $$("#overlayLayout,#overlayTheme,#overlayRows,#overlayHitRows,#overlayScale,#overlayBg,.show-options input").forEach((control) => control.addEventListener("input", () => renderStudioPreview(true)));
     $$("#accentOptions button").forEach((button) => button.addEventListener("click", () => { $$("#accentOptions button").forEach((b) => b.classList.toggle("active", b === button)); renderStudioPreview(true); }));
-    $("#copyObsUrl")?.addEventListener("click", async () => { await copyText($("#obsUrl").value); showToast("OBS browser source URL copied."); });
+    $("#copyObsUrl")?.addEventListener("click", async () => { await copyText($("#obsUrl").value); showToast("URL copied. In OBS, press Ctrl+A in the URL field before pasting."); });
     $("#desktopOverlayToggle")?.addEventListener("click", (event) => setOutputEnabled("desktop", event.currentTarget.getAttribute("aria-checked") !== "true", event.currentTarget));
     $("#desktopHeadsetToggle")?.addEventListener("click", (event) => setDesktopHeadsetVisibility(event.currentTarget));
     $("#vrOverlayToggle")?.addEventListener("click", (event) => setOutputEnabled("vr", event.currentTarget.getAttribute("aria-checked") !== "true", event.currentTarget));
@@ -1389,10 +1420,22 @@
 
   async function bootOverlay() {
     document.body.dataset.overlay = "true"; const options = overlayOptionsFromSearch();
-    const fallback = makeMockLive();
-    try { state.live = normalizeLive(await api("/api/live"), fallback); state.apiOnline = true; state.usingMock = false; state.lastLiveAt = Date.now(); } catch (_) { state.live = fallback; state.usingMock = true; }
-    const root = $("#overlayRoot"); const render = () => renderCombatOverlay(root, state.live, options); render(); connectStream(render); startDemoClock(render);
-    if (!state.usingMock) state.timers.push(setInterval(render, 1000));
+    const root = $("#overlayRoot"); const render = () => renderCombatOverlay(root, state.live, options);
+    state.live = makeOverlayWaitingLive(false); state.usingMock = false; state.overlayServiceState = "connecting"; render();
+    try { state.live = normalizeLive(await api("/api/live"), makeOverlayWaitingLive(true)); state.apiOnline = true; state.overlayServiceState = "ready"; state.lastLiveAt = Date.now(); }
+    catch (_) { state.apiOnline = false; state.overlayServiceState = "lost"; }
+    render();
+    connectStream(render, { onStreamState: (signal) => {
+      if (signal === "error") {
+        if (state.overlayServiceState === "lost" || state.overlayStreamLossTimer !== null) return;
+        state.overlayStreamLossTimer = setTimeout(() => { state.overlayStreamLossTimer = null; state.overlayServiceState = "lost"; render(); }, 2500);
+        return;
+      }
+      clearTimeout(state.overlayStreamLossTimer); state.overlayStreamLossTimer = null;
+      state.overlayServiceState = signal === "message" ? "ready" : "connecting";
+      if (signal !== "message") render();
+    } });
+    state.timers.push(setInterval(render, 1000));
   }
 
   async function bootApp() {

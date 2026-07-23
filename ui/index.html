@@ -272,7 +272,8 @@
                 <header><span class="step-index">03</span><div><h2>Send it somewhere</h2><p>Each output can use its own profile and position.</p></div></header>
                 <div class="output-cards">
                   <div class="output-card obs-card"><div class="output-icon">OBS</div><div><strong>OBS browser source</strong><small>Transparent web output · recommended 720 × 480</small></div><span class="ready-pill">READY</span></div>
-                  <div class="url-copy"><input id="obsUrl" readonly aria-label="OBS browser source URL"><button id="copyObsUrl">Copy URL</button></div>
+                  <div class="url-copy"><input id="obsUrl" readonly aria-label="OBS browser source URL"><button id="copyObsUrl">Copy for OBS</button></div>
+                  <p class="obs-paste-hint"><strong>In OBS:</strong> click the URL field, press <kbd>Ctrl+A</kbd>, then paste. Replace the entire default <code>https://obsproject.com/browser-source</code> address.</p>
                   <div class="output-card"><div class="output-icon desktop-icon">▣</div><div><strong>Desktop overlay</strong><small>Click-through layer above VRChat while in desktop mode</small></div><button class="switch" id="desktopOverlayToggle" role="switch" aria-checked="false"><i></i></button></div>
                   <div class="grab-control"><div><strong>Show desktop HUD with a detected headset</strong><small>Enable this if a connected but idle headset would otherwise hide the desktop overlay.</small></div><button class="switch" id="desktopHeadsetToggle" type="button" role="switch" aria-checked="false" aria-label="Show desktop overlay when a headset is detected"><i></i></button></div>
                   <div class="output-card"><div class="output-icon vr-icon">VR</div><div><strong>VR overlay</strong><small id="vrOverlayStatus">OpenVR panel with saved coordinates or optional controller placement</small></div><button class="switch" id="vrOverlayToggle" role="switch" aria-checked="false"><i></i></button></div>
@@ -305,7 +306,7 @@
                 <div id="studioOverlayPreview" class="embedded-overlay"></div>
                 <span class="stage-size">720 × 480</span>
               </div>
-              <div class="preview-hints"><span><i></i> Transparency grid is preview-only</span><span>OBS refreshes automatically</span></div>
+              <div class="preview-hints"><span><i></i> Transparency grid is preview-only</span><span>Keep MINMAXXER running while OBS uses the source</span></div>
             </div>
           </div>
         </section>

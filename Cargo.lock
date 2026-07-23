@@ -2032,7 +2032,7 @@ dependencies = [
 
 [[package]]
 name = "minmaxxer"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -2057,7 +2057,7 @@ dependencies = [
 
 [[package]]
 name = "minmaxxer-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "chrono",
  "regex",

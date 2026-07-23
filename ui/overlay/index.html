@@ -6,11 +6,24 @@
   <meta name="color-scheme" content="dark">
   <meta name="theme-color" content="transparent">
   <title>MINMAXXER Overlay</title>
-  <style>html,body{margin:0;background:transparent!important;color-scheme:dark}</style>
+  <style>
+    html,body{margin:0;background:transparent!important;color-scheme:dark}
+    .overlay-bootstrap{box-sizing:border-box;width:420px;overflow:hidden;color:#edf6fc;background:rgba(7,10,15,.78);border:1px solid rgba(155,180,207,.18);border-radius:13px;box-shadow:0 18px 54px rgba(0,0,0,.34);font-family:"Segoe UI Variable","Segoe UI",sans-serif}
+    .overlay-bootstrap::before{display:block;height:2px;content:"";background:linear-gradient(90deg,#54e6ff,transparent 70%);box-shadow:0 0 12px #54e6ff}
+    .overlay-bootstrap header{display:flex;align-items:center;gap:9px;padding:12px 14px 10px;border-bottom:1px solid rgba(155,180,207,.14)}
+    .overlay-bootstrap header b{width:26px;height:26px;display:grid;place-items:center;color:#54e6ff;background:rgba(84,230,255,.08);border:1px solid rgba(84,230,255,.24);border-radius:6px;font:900 8px "Cascadia Code",monospace}
+    .overlay-bootstrap header span,.overlay-bootstrap header strong{display:block}.overlay-bootstrap header strong{font-size:12px}.overlay-bootstrap header span{margin-top:1px;color:#748394;font:7px "Cascadia Code",monospace;letter-spacing:.09em}
+    .overlay-bootstrap main{padding:22px 18px}.overlay-bootstrap main span{color:#54e6ff;font:7px "Cascadia Code",monospace;letter-spacing:.12em}.overlay-bootstrap main strong{display:block;margin-top:6px;font:700 14px "Cascadia Code",monospace;letter-spacing:.03em}.overlay-bootstrap main p{margin:7px 0 0;color:#748394;font-size:9px}
+  </style>
   <link rel="stylesheet" href="../style.css">
 </head>
 <body data-forced-overlay="true">
-  <div id="overlayRoot" class="overlay-root" aria-live="polite"></div>
+  <div id="overlayRoot" class="overlay-root" aria-live="polite">
+    <section class="overlay-bootstrap" aria-label="MINMAXXER overlay status">
+      <header><b>MX</b><div><strong>MINMAXXER</strong><span>LOCAL OBS HUD</span></div></header>
+      <main><span>MINMAXXER</span><strong>CONNECTING TO LOCAL SERVICE</strong><p>Start MINMAXXER if this message does not clear.</p></main>
+    </section>
+  </div>
   <div class="toast-region" id="toastRegion" aria-live="polite" aria-atomic="true"></div>
   <script src="../app.js" defer></script>
 </body>

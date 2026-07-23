@@ -729,6 +729,51 @@ mod tests {
     }
 
     #[test]
+    fn embedded_overlay_ships_a_dark_pre_script_local_service_fallback() {
+        let script_start = OVERLAY_HTML
+            .find("<script")
+            .expect("the embedded overlay should load its application script");
+        let pre_script_markup = &OVERLAY_HTML[..script_start];
+        let normalized_markup = pre_script_markup.to_ascii_lowercase();
+
+        assert!(pre_script_markup.contains("CONNECTING TO LOCAL SERVICE"));
+        assert!(normalized_markup.contains("color-scheme:dark"));
+        assert!(normalized_markup.contains("background:"));
+        assert!(!pre_script_markup.contains("DEMO DATA"));
+        assert!(!pre_script_markup.contains("Astral Sovereign"));
+        assert!(!pre_script_markup.contains("48,240"));
+    }
+
+    #[test]
+    fn main_ui_tells_obs_users_to_replace_the_entire_default_url() {
+        let normalized_html = INDEX_HTML.to_ascii_lowercase();
+
+        assert!(INDEX_HTML.contains("Ctrl+A"));
+        assert!(normalized_html.contains("obs"));
+        assert!(normalized_html.contains("replace the entire"));
+        assert!(normalized_html.contains("url"));
+    }
+
+    #[test]
+    fn obs_runtime_uses_truthful_idle_and_disconnect_states_without_demo_combat() {
+        let boot_start = APP_JS
+            .find("async function bootOverlay()")
+            .expect("the OBS overlay bootstrap should exist");
+        let boot_end = APP_JS[boot_start..]
+            .find("async function bootApp()")
+            .map(|offset| boot_start + offset)
+            .expect("the main app bootstrap should follow the overlay bootstrap");
+        let overlay_boot = &APP_JS[boot_start..boot_end];
+
+        assert!(APP_JS.contains("NO LIVE ECLIPTICA INSTANCE"));
+        assert!(APP_JS.contains("LOCAL SERVICE DISCONNECTED"));
+        assert!(APP_JS.contains("RECONNECTING"));
+        assert!(overlay_boot.contains("makeOverlayWaitingLive"));
+        assert!(!overlay_boot.contains("makeMockLive"));
+        assert!(!overlay_boot.contains("startDemoClock"));
+    }
+
+    #[test]
     fn studio_profile_and_background_reach_native_outputs() {
         let mut base = serde_json::to_value(AppConfig::default()).unwrap();
         let patch = json!({

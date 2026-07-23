@@ -14,6 +14,26 @@ const FOCUS_RECENT_SECONDS: f64 = 45.0;
 const FOCUS_AGING_SECONDS: f64 = 90.0;
 const FOCUS_CORROBORATION_WINDOW_SECONDS: f64 = 5.0;
 const FOCUS_CORROBORATION_DISPLAY_SECONDS: f64 = 8.0;
+const RUN_PROGRESS_EPSILON: f64 = 0.000_001;
+
+// The 13 stage-entry progress values observed in the audited Ecliptica run. Normal live
+// tracking counts StageEntered announcements, but these anchors let a collector which attaches
+// halfway through a run recover a useful (and explicitly labelled) estimate.
+const BOSS_PROGRESS_ANCHORS: [f64; 13] = [
+    0.0,
+    0.058_578_34,
+    0.117_840_4,
+    0.180_254_8,
+    0.242_994,
+    0.328_492_1,
+    0.418_829_3,
+    0.510_591_1,
+    0.607_867_4,
+    0.698_260_7,
+    0.795_897,
+    0.900_034_6,
+    1.0,
+];
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct LiveEncounter {
@@ -52,6 +72,50 @@ pub struct FocusSignal {
     pub source_note: String,
 }
 
+/// Live position within Ecliptica's 13-boss run. `boss_number` describes the upcoming boss while
+/// a stage is active and the current boss once its BossStarted line arrives. A recovered mid-log
+/// value remains labelled by `boss_number_inferred` until an authoritative special-stage marker
+/// is observed or a fresh run is seen from progress zero.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RunContext {
+    pub progress: Option<f64>,
+    pub phase_name: Option<String>,
+    pub boss_number: Option<u8>,
+    #[serde(default)]
+    pub boss_number_inferred: bool,
+    pub boss_subphase: Option<u8>,
+}
+
+/// Shop selection shape reserved for a future authoritative Ecliptica log signal.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LoadoutItem {
+    pub name: String,
+    pub stacks: u32,
+}
+
+/// The audited VRChat log does not expose shop selections or stack counts. Keep an additive,
+/// honest capability object in the API so every display surface can distinguish unavailable data
+/// from an observed empty loadout.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LoadoutState {
+    pub available: bool,
+    #[serde(default)]
+    pub items: Vec<LoadoutItem>,
+    pub source_note: String,
+}
+
+impl Default for LoadoutState {
+    fn default() -> Self {
+        Self {
+            available: false,
+            items: Vec::new(),
+            source_note: "Ecliptica does not expose shop item selections or stack counts in the audited VRChat log.".to_owned(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EngineSnapshot {
     pub version: u64,
@@ -64,6 +128,10 @@ pub struct EngineSnapshot {
     pub world: Option<String>,
     pub stage: Option<String>,
     pub class_name: Option<String>,
+    #[serde(default)]
+    pub run_context: RunContext,
+    #[serde(default)]
+    pub loadout: LoadoutState,
     pub encounter: LiveEncounter,
     pub focus: Option<FocusSignal>,
     pub outgoing: DamageTotals,
@@ -94,6 +162,8 @@ impl Default for EngineSnapshot {
             world: None,
             stage: None,
             class_name: None,
+            run_context: RunContext::default(),
+            loadout: LoadoutState::default(),
             encounter: LiveEncounter::default(),
             focus: None,
             outgoing: DamageTotals::default(),
@@ -122,6 +192,9 @@ pub struct CombatEngine {
     world: Option<String>,
     stage: Option<String>,
     class_name: Option<String>,
+    run_context: RunContext,
+    run_stage_markers: BTreeSet<(String, u64)>,
+    run_session_id: Option<u32>,
     encounter: LiveEncounter,
     focus: Option<FocusSignal>,
     outgoing: DamageTotals,
@@ -153,6 +226,9 @@ impl CombatEngine {
             world: None,
             stage: None,
             class_name: None,
+            run_context: RunContext::default(),
+            run_stage_markers: BTreeSet::new(),
+            run_session_id: None,
             encounter: LiveEncounter::default(),
             focus: None,
             outgoing: DamageTotals::default(),
@@ -190,7 +266,11 @@ impl CombatEngine {
         if event.world.is_some() {
             self.world = event.world.clone();
         }
-        if event.stage.is_some() {
+        // BossStarted lines can arrive late after a later run-progress value is already active.
+        // Delay their stage assignment until the transition has passed the stale-line guard.
+        if !matches!(event.kind, EventKind::StageEntered | EventKind::BossStarted)
+            && event.stage.is_some()
+        {
             self.stage = event.stage.clone();
         }
         if event.class_name.is_some() {
@@ -201,6 +281,7 @@ impl CombatEngine {
             EventKind::WorldEntered => {
                 self.in_world = true;
                 self.reset_encounter();
+                self.reset_run_context();
                 self.session_id = None;
                 self.stage = None;
                 self.class_name = None;
@@ -214,6 +295,7 @@ impl CombatEngine {
                 self.in_world = false;
                 self.encounter.active = false;
                 self.focus = None;
+                self.reset_run_context();
                 self.session_id = None;
                 self.world = None;
                 self.stage = None;
@@ -244,29 +326,41 @@ impl CombatEngine {
                 }
             }
             EventKind::StageEntered => {
-                self.begin_encounter(
-                    event.stage.clone().unwrap_or_else(|| "Stage".to_owned()),
-                    "stage",
-                    event.timestamp,
-                    event.phase,
-                );
+                if self.observe_stage_entered(&event) {
+                    if event.stage.is_some() {
+                        self.stage = event.stage.clone();
+                    }
+                    self.begin_encounter(
+                        event.stage.clone().unwrap_or_else(|| "Stage".to_owned()),
+                        "stage",
+                        event.timestamp,
+                        event.phase,
+                    );
+                }
             }
             EventKind::BossStarted => {
-                self.focus = None;
-                self.begin_encounter(
-                    event.boss.clone().unwrap_or_else(|| "Boss".to_owned()),
-                    "boss",
-                    event.timestamp,
-                    event.phase,
-                );
+                if self.observe_boss_started(&event) {
+                    if event.stage.is_some() {
+                        self.stage = event.stage.clone();
+                    }
+                    self.focus = None;
+                    self.begin_encounter(
+                        event.boss.clone().unwrap_or_else(|| "Boss".to_owned()),
+                        "boss",
+                        event.timestamp,
+                        event.phase,
+                    );
+                }
             }
             EventKind::Intermission | EventKind::Lobby => {
                 self.update_duration(event.timestamp);
                 self.encounter.active = false;
                 self.focus = None;
+                self.run_context.boss_subphase = None;
                 if event.kind == EventKind::Lobby {
                     self.stage = None;
                     self.class_name = None;
+                    self.reset_run_context();
                 }
             }
             EventKind::BossDefeated => {
@@ -280,6 +374,7 @@ impl CombatEngine {
                     self.update_duration(event.timestamp);
                     self.encounter.active = false;
                     self.focus = None;
+                    self.run_context.boss_subphase = None;
                 }
             }
             EventKind::GameMessage if event.message.as_deref() == Some("session_invalidated") => {
@@ -414,6 +509,8 @@ impl CombatEngine {
             world: self.world.clone(),
             stage: self.stage.clone(),
             class_name: self.class_name.clone(),
+            run_context: self.run_context.clone(),
+            loadout: LoadoutState::default(),
             encounter,
             focus: self.current_focus_at(clock),
             outgoing,
@@ -477,6 +574,148 @@ impl CombatEngine {
             duration_seconds: 0.0,
             active: true,
         };
+    }
+
+    /// Records a distinct run stage and returns whether it should begin a new live encounter.
+    fn observe_stage_entered(&mut self, event: &GameEvent) -> bool {
+        let progress = valid_run_progress(event.phase);
+        let stage = event.stage.as_deref().unwrap_or("Stage");
+        let session_changed = self
+            .run_session_id
+            .zip(event.session_id)
+            .is_some_and(|(previous, current)| previous != current);
+        let progress_rolled_back = self
+            .run_context
+            .progress
+            .zip(progress)
+            .is_some_and(|(previous, current)| current + RUN_PROGRESS_EPSILON < previous);
+        let marker = (
+            entity_key(stage),
+            progress.map(f64::to_bits).unwrap_or(u64::MAX),
+        );
+
+        // Buffered stage announcements can arrive after the run has advanced. Check a known
+        // marker before considering rollback so a delayed copy can never reset the live boss,
+        // its damage, or its target evidence. A changed session is allowed to reuse the same
+        // stage marker because it is an explicit new-run boundary.
+        if !session_changed && self.run_stage_markers.contains(&marker) {
+            return false;
+        }
+
+        // Numeric progress alone is not a trustworthy run boundary: old stage lines are often
+        // replayed out of order. Only a session change or a newly observed progress-zero stage
+        // can start a fresh count. Any other backwards announcement is ignored in full.
+        let verified_zero_start = progress.is_some_and(|current| {
+            current <= RUN_PROGRESS_EPSILON
+                && self
+                    .run_context
+                    .progress
+                    .is_some_and(|previous| previous > RUN_PROGRESS_EPSILON)
+        });
+        if session_changed || verified_zero_start {
+            self.reset_run_context();
+        } else if progress_rolled_back {
+            return false;
+        }
+
+        let boss_number = if is_bringer_stage(stage) {
+            Some(13)
+        } else if let Some(previous) = self.run_context.boss_number {
+            Some(previous.saturating_add(1).min(13))
+        } else if progress.is_some_and(|value| value <= RUN_PROGRESS_EPSILON) {
+            Some(1)
+        } else {
+            progress.and_then(infer_boss_number)
+        };
+        let boss_number_inferred = if is_bringer_stage(stage)
+            || progress.is_some_and(|value| value <= RUN_PROGRESS_EPSILON)
+        {
+            false
+        } else if self.run_context.boss_number.is_some() {
+            self.run_context.boss_number_inferred
+        } else {
+            boss_number.is_some()
+        };
+
+        self.set_run_progress(progress);
+        self.run_context.boss_number = boss_number;
+        self.run_context.boss_number_inferred = boss_number_inferred;
+        self.run_context.boss_subphase = None;
+        self.run_stage_markers.insert(marker);
+        if event.session_id.is_some() {
+            self.run_session_id = event.session_id;
+        }
+        true
+    }
+
+    /// Updates run position for an accepted boss announcement. Returns false for an old replay so
+    /// the caller can reject the entire encounter transition, not merely its ordinal metadata.
+    fn observe_boss_started(&mut self, event: &GameEvent) -> bool {
+        let progress = valid_run_progress(event.phase);
+        let boss = event.boss.as_deref().unwrap_or("Boss");
+        let is_bringer = event.stage.as_deref().is_some_and(is_bringer_stage)
+            || entity_key(boss).starts_with("jimbringer");
+        let session_changed = self
+            .run_session_id
+            .zip(event.session_id)
+            .is_some_and(|(previous, current)| previous != current);
+        if session_changed {
+            // A collector may miss the new run's first StageEntered line. Session identity is a
+            // stronger boundary than a lower progress value, so reset before the stale guard and
+            // recover from this boss announcement.
+            self.reset_run_context();
+        }
+        let announces_earlier_progress = self
+            .run_context
+            .progress
+            .zip(progress)
+            .is_some_and(|(previous, current)| current + RUN_PROGRESS_EPSILON < previous);
+        let announces_unseen_progress = match (self.run_context.progress, progress) {
+            // BossStarted is not a run-boundary signal. Accept forward progress when a stage line
+            // was missed, but never let a delayed/replayed earlier boss roll live context back.
+            (Some(previous), Some(current)) => current > previous + RUN_PROGRESS_EPSILON,
+            (None, Some(_)) => true,
+            _ => false,
+        };
+
+        if is_bringer {
+            // Some late/replayed JimBringer announcements carry a misleading zero phase. The
+            // named final boss and Stage_Bringer are stronger signals than that recycled field.
+            self.set_run_progress(Some(1.0));
+            self.run_context.boss_number = Some(13);
+            self.run_context.boss_number_inferred = false;
+        } else {
+            if announces_earlier_progress {
+                return false;
+            }
+            if self.run_context.boss_number.is_none() || announces_unseen_progress {
+                self.set_run_progress(progress);
+                self.run_context.boss_number = progress.and_then(infer_boss_number);
+                self.run_context.boss_number_inferred = self.run_context.boss_number.is_some();
+            }
+        }
+        self.run_context.boss_subphase = parse_boss_subphase(boss);
+        if let (Some(stage), Some(progress)) = (event.stage.as_deref(), progress) {
+            self.run_stage_markers
+                .insert((entity_key(stage), progress.to_bits()));
+        }
+        if event.session_id.is_some() {
+            self.run_session_id = event.session_id;
+        }
+        true
+    }
+
+    fn set_run_progress(&mut self, progress: Option<f64>) {
+        if let Some(progress) = progress {
+            self.run_context.progress = Some(progress);
+            self.run_context.phase_name = phase_name_for_progress(progress).map(str::to_owned);
+        }
+    }
+
+    fn reset_run_context(&mut self) {
+        self.run_context = RunContext::default();
+        self.run_stage_markers.clear();
+        self.run_session_id = None;
     }
 
     fn reset_encounter(&mut self) {
@@ -1760,6 +1999,51 @@ fn entity_key(value: &str) -> String {
         .collect()
 }
 
+fn valid_run_progress(progress: Option<f64>) -> Option<f64> {
+    progress.filter(|value| value.is_finite() && (0.0..=1.0).contains(value))
+}
+
+// Ecliptica logs the numeric value but not these names. These half-open bands implement the
+// documented third-party EACT convention; they are a presentation mapping, not a world API.
+fn phase_name_for_progress(progress: f64) -> Option<&'static str> {
+    match progress {
+        value if (0.0..0.2).contains(&value) => Some("PRIME"),
+        value if (0.2..0.4).contains(&value) => Some("PENUMBRA"),
+        value if (0.4..0.6).contains(&value) => Some("ANTUMBRA"),
+        value if (0.6..0.8).contains(&value) => Some("UMBRA"),
+        value if (0.8..=1.0).contains(&value) => Some("ECLIPSE"),
+        _ => None,
+    }
+}
+
+fn infer_boss_number(progress: f64) -> Option<u8> {
+    valid_run_progress(Some(progress)).and_then(|progress| {
+        BOSS_PROGRESS_ANCHORS
+            .iter()
+            .enumerate()
+            .min_by(|(_, left), (_, right)| {
+                (progress - **left)
+                    .abs()
+                    .total_cmp(&(progress - **right).abs())
+            })
+            .map(|(index, _)| (index + 1) as u8)
+    })
+}
+
+fn is_bringer_stage(stage: &str) -> bool {
+    entity_key(stage) == "stagebringer"
+}
+
+fn parse_boss_subphase(boss: &str) -> Option<u8> {
+    let normalized = boss.trim().trim_end_matches("(Clone)");
+    let lowercase = normalized.to_ascii_lowercase();
+    let phase_at = lowercase.rfind("phase")?;
+    let suffix = &normalized[phase_at + "phase".len()..];
+    (!suffix.is_empty() && suffix.chars().all(|character| character.is_ascii_digit()))
+        .then(|| suffix.parse::<u8>().ok().filter(|value| *value > 0))
+        .flatten()
+}
+
 fn capability_note() -> String {
     "VRChat logs expose this client's outgoing hits and incoming damage. Party DPS is available when each player's collector data is imported or connected; ownership-transfer lines are never treated as damage attribution.".to_owned()
 }
@@ -1808,6 +2092,382 @@ mod tests {
         value.amount = None;
         value.damage_type = None;
         value
+    }
+
+    fn stage_event(second: u32, stage: &str, progress: f64) -> GameEvent {
+        let mut value = event(second, EventKind::StageEntered, 0.0);
+        value.stage = Some(stage.to_owned());
+        value.boss = None;
+        value.phase = Some(progress);
+        value
+    }
+
+    #[test]
+    fn run_phase_names_use_documented_third_party_progress_bands() {
+        assert_eq!(phase_name_for_progress(0.0), Some("PRIME"));
+        assert_eq!(phase_name_for_progress(0.199_999), Some("PRIME"));
+        assert_eq!(phase_name_for_progress(0.2), Some("PENUMBRA"));
+        assert_eq!(phase_name_for_progress(0.399_999), Some("PENUMBRA"));
+        assert_eq!(phase_name_for_progress(0.4), Some("ANTUMBRA"));
+        assert_eq!(phase_name_for_progress(0.599_999), Some("ANTUMBRA"));
+        assert_eq!(phase_name_for_progress(0.6), Some("UMBRA"));
+        assert_eq!(phase_name_for_progress(0.799_999), Some("UMBRA"));
+        assert_eq!(phase_name_for_progress(0.8), Some("ECLIPSE"));
+        assert_eq!(phase_name_for_progress(1.0), Some("ECLIPSE"));
+        assert_eq!(phase_name_for_progress(-0.01), None);
+        assert_eq!(phase_name_for_progress(1.01), None);
+    }
+
+    #[test]
+    fn stage_entries_count_all_thirteen_bosses_without_counting_boss_subphases() {
+        let mut engine = CombatEngine::new();
+        for (index, progress) in BOSS_PROGRESS_ANCHORS.iter().copied().enumerate() {
+            let stage = if index == 12 {
+                "Stage_Bringer".to_owned()
+            } else {
+                format!("Stage_{index}")
+            };
+            let stage = stage_event(index as u32, &stage, progress);
+            engine.ingest(stage.clone());
+            // A repeated stage announcement is a network duplicate, not another boss.
+            engine.ingest(stage);
+
+            let context = engine.snapshot().run_context;
+            assert_eq!(context.progress, Some(progress));
+            assert_eq!(context.boss_number, Some((index + 1) as u8));
+            assert!(!context.boss_number_inferred);
+        }
+
+        let mut phase_two = event(20, EventKind::BossStarted, 0.0);
+        phase_two.stage = Some("Stage_Bringer".to_owned());
+        phase_two.boss = Some("JimBringerPhase2".to_owned());
+        // A pre-sync replay observed in the audited log reports zero here. It must not roll the
+        // already-established final-boss context back to PRIME.
+        phase_two.phase = Some(0.0);
+        engine.ingest(phase_two.clone());
+        engine.ingest(phase_two);
+        let phase_two_context = engine.snapshot().run_context;
+        assert_eq!(phase_two_context.progress, Some(1.0));
+        assert_eq!(phase_two_context.phase_name.as_deref(), Some("ECLIPSE"));
+        assert_eq!(phase_two_context.boss_number, Some(13));
+        assert_eq!(phase_two_context.boss_subphase, Some(2));
+        assert!(!phase_two_context.boss_number_inferred);
+
+        let mut phase_three = event(21, EventKind::BossStarted, 0.0);
+        phase_three.stage = Some("Stage_Bringer".to_owned());
+        phase_three.boss = Some("JimBringerPhase3(Clone)".to_owned());
+        phase_three.phase = Some(1.0);
+        engine.ingest(phase_three);
+        let phase_three_context = engine.snapshot().run_context;
+        assert_eq!(phase_three_context.boss_number, Some(13));
+        assert_eq!(phase_three_context.boss_subphase, Some(3));
+    }
+
+    #[test]
+    fn delayed_duplicate_stage_does_not_replace_a_boss_or_reset_its_damage() {
+        let mut engine = CombatEngine::new();
+        let stage = stage_event(1, "Stage_First", 0.0);
+        engine.ingest(stage.clone());
+
+        let mut boss = event(2, EventKind::BossStarted, 0.0);
+        boss.stage = Some("Stage_First".to_owned());
+        boss.boss = Some("FirstBoss".to_owned());
+        boss.phase = Some(0.0);
+        engine.ingest(boss);
+        let mut hit = event(3, EventKind::DamageDealt, 450.0);
+        hit.stage = Some("Stage_First".to_owned());
+        engine.ingest(hit);
+        let before_duplicate = engine.snapshot();
+
+        let mut delayed_stage = stage;
+        delayed_stage.timestamp = event(4, EventKind::StageEntered, 0.0).timestamp;
+        engine.ingest(delayed_stage);
+        let after_duplicate = engine.snapshot();
+
+        assert_eq!(after_duplicate.stage.as_deref(), Some("Stage_First"));
+        assert_eq!(after_duplicate.encounter.name, "FirstBoss");
+        assert_eq!(after_duplicate.encounter.kind, "boss");
+        assert_eq!(
+            after_duplicate.encounter.started_at,
+            before_duplicate.encounter.started_at
+        );
+        assert_eq!(after_duplicate.outgoing.total, 450.0);
+        assert_eq!(after_duplicate.outgoing.hits, 1);
+        assert_eq!(after_duplicate.run_context.boss_number, Some(1));
+    }
+
+    #[test]
+    fn delayed_earlier_stage_does_not_roll_back_an_active_boss() {
+        let mut engine = CombatEngine::new();
+        for (index, progress) in BOSS_PROGRESS_ANCHORS.iter().copied().enumerate().take(10) {
+            engine.ingest(stage_event(
+                index as u32,
+                &format!("Stage_{index}"),
+                progress,
+            ));
+        }
+
+        let mut boss = event(10, EventKind::BossStarted, 0.0);
+        boss.stage = Some("Stage_9".to_owned());
+        boss.boss = Some("CurrentBoss".to_owned());
+        boss.phase = Some(BOSS_PROGRESS_ANCHORS[9]);
+        engine.ingest(boss);
+
+        let mut ownership = event(11, EventKind::OwnershipTransferred, 0.0);
+        ownership.stage = Some("Stage_9".to_owned());
+        ownership.phase = Some(BOSS_PROGRESS_ANCHORS[9]);
+        ownership.entity = Some("CurrentBoss(Clone)".to_owned());
+        ownership.target = Some("PlayerTwo".to_owned());
+        engine.ingest(ownership);
+
+        let mut hit = event(12, EventKind::DamageDealt, 725.0);
+        hit.stage = Some("Stage_9".to_owned());
+        hit.phase = Some(BOSS_PROGRESS_ANCHORS[9]);
+        engine.ingest(hit);
+        let before = engine.snapshot();
+
+        let mut delayed = stage_event(13, "Stage_4", BOSS_PROGRESS_ANCHORS[4]);
+        delayed.session_id = Some(42);
+        engine.ingest(delayed);
+        let after = engine.snapshot();
+
+        assert_eq!(after.run_context, before.run_context);
+        assert_eq!(after.stage, before.stage);
+        assert_eq!(after.encounter.name, before.encounter.name);
+        assert_eq!(after.encounter.kind, before.encounter.kind);
+        assert_eq!(after.encounter.phase, before.encounter.phase);
+        assert_eq!(after.encounter.started_at, before.encounter.started_at);
+        assert_eq!(after.encounter.active, before.encounter.active);
+        assert_eq!(after.outgoing.total, 725.0);
+        assert_eq!(after.outgoing.hits, 1);
+        let before_focus = before
+            .focus
+            .expect("current boss should have target evidence");
+        let after_focus = after
+            .focus
+            .expect("delayed stage must preserve target evidence");
+        assert_eq!(after_focus.player, before_focus.player);
+        assert_eq!(after_focus.entity, before_focus.entity);
+        assert_eq!(after_focus.observed_at, before_focus.observed_at);
+        assert_eq!(after_focus.evidence, before_focus.evidence);
+        assert_eq!(after_focus.confidence, before_focus.confidence);
+        assert_eq!(
+            after_focus.corroborating_hits,
+            before_focus.corroborating_hits
+        );
+    }
+
+    #[test]
+    fn partial_run_uses_calibrated_boss_anchor_and_keeps_inference_label() {
+        let mut engine = CombatEngine::new();
+        let eighth = stage_event(1, "Stage_MidLog", BOSS_PROGRESS_ANCHORS[7]);
+        engine.ingest(eighth.clone());
+        engine.ingest(eighth);
+        let recovered = engine.snapshot().run_context;
+        assert_eq!(recovered.boss_number, Some(8));
+        assert!(recovered.boss_number_inferred);
+        assert_eq!(recovered.phase_name.as_deref(), Some("ANTUMBRA"));
+
+        let mut phase_two = event(2, EventKind::BossStarted, 0.0);
+        phase_two.stage = Some("Stage_MidLog".to_owned());
+        phase_two.boss = Some("RecoveredBossPhase2".to_owned());
+        phase_two.phase = Some(BOSS_PROGRESS_ANCHORS[7]);
+        engine.ingest(phase_two);
+        assert_eq!(engine.snapshot().run_context.boss_number, Some(8));
+        assert_eq!(engine.snapshot().run_context.boss_subphase, Some(2));
+
+        engine.ingest(stage_event(
+            3,
+            "Stage_AfterReconnect",
+            BOSS_PROGRESS_ANCHORS[8],
+        ));
+        let counted = engine.snapshot().run_context;
+        assert_eq!(counted.boss_number, Some(9));
+        assert!(counted.boss_number_inferred);
+        assert_eq!(counted.phase_name.as_deref(), Some("UMBRA"));
+    }
+
+    #[test]
+    fn boss_only_mid_log_recovery_is_inferred_without_incrementing_multiphase() {
+        let mut engine = CombatEngine::new();
+        let mut boss = event(1, EventKind::BossStarted, 0.0);
+        boss.stage = Some("Stage_Unknown".to_owned());
+        boss.boss = Some("Corus".to_owned());
+        boss.phase = Some(BOSS_PROGRESS_ANCHORS[9]);
+        engine.ingest(boss);
+        assert_eq!(engine.snapshot().run_context.boss_number, Some(10));
+        assert!(engine.snapshot().run_context.boss_number_inferred);
+
+        // A delayed copy of the same stage header must not turn the current boss into #11.
+        engine.ingest(stage_event(2, "Stage_Unknown", BOSS_PROGRESS_ANCHORS[9]));
+        assert_eq!(engine.snapshot().run_context.boss_number, Some(10));
+
+        let mut phase_two = event(3, EventKind::BossStarted, 0.0);
+        phase_two.stage = Some("Stage_Unknown".to_owned());
+        phase_two.boss = Some("CorusPhase2".to_owned());
+        phase_two.phase = Some(BOSS_PROGRESS_ANCHORS[9]);
+        engine.ingest(phase_two);
+        let context = engine.snapshot().run_context;
+        assert_eq!(context.boss_number, Some(10));
+        assert_eq!(context.boss_subphase, Some(2));
+        assert!(context.boss_number_inferred);
+
+        let mut ownership = event(4, EventKind::OwnershipTransferred, 0.0);
+        ownership.stage = Some("Stage_Unknown".to_owned());
+        ownership.phase = Some(BOSS_PROGRESS_ANCHORS[9]);
+        ownership.entity = Some("CorusPhase2(Clone)".to_owned());
+        ownership.target = Some("PlayerTwo".to_owned());
+        engine.ingest(ownership);
+
+        let mut hit = event(5, EventKind::DamageDealt, 320.0);
+        hit.stage = Some("Stage_Unknown".to_owned());
+        hit.phase = Some(BOSS_PROGRESS_ANCHORS[9]);
+        engine.ingest(hit);
+        let before_stale = engine.snapshot();
+        assert_eq!(before_stale.encounter.name, "CorusPhase2");
+        assert_eq!(before_stale.outgoing.total, 320.0);
+        assert_eq!(before_stale.focus.as_ref().unwrap().player, "PlayerTwo");
+
+        let mut stale_phase = event(6, EventKind::BossStarted, 0.0);
+        stale_phase.stage = Some("Stage_Older".to_owned());
+        stale_phase.boss = Some("OlderBossPhase3".to_owned());
+        stale_phase.phase = Some(BOSS_PROGRESS_ANCHORS[4]);
+        engine.ingest(stale_phase);
+        let after_stale = engine.snapshot();
+        assert_eq!(
+            after_stale.run_context.progress,
+            Some(BOSS_PROGRESS_ANCHORS[9])
+        );
+        assert_eq!(after_stale.run_context.boss_number, Some(10));
+        assert_eq!(after_stale.run_context.boss_subphase, Some(2));
+        assert_eq!(after_stale.stage.as_deref(), Some("Stage_Unknown"));
+        assert_eq!(after_stale.encounter.name, "CorusPhase2");
+        assert_eq!(
+            after_stale.encounter.started_at,
+            before_stale.encounter.started_at
+        );
+        assert_eq!(after_stale.outgoing.total, 320.0);
+        assert_eq!(after_stale.outgoing.hits, 1);
+        let focus = after_stale
+            .focus
+            .expect("stale start must preserve target proxy");
+        assert_eq!(focus.player, "PlayerTwo");
+        assert_eq!(focus.entity, "CorusPhase2(Clone)");
+    }
+
+    #[test]
+    fn new_session_boss_only_recovery_accepts_lower_progress() {
+        let mut engine = CombatEngine::new();
+        let mut prior_stage = stage_event(1, "Stage_Prior", BOSS_PROGRESS_ANCHORS[10]);
+        prior_stage.session_id = Some(42);
+        engine.ingest(prior_stage);
+
+        let mut prior_boss = event(2, EventKind::BossStarted, 0.0);
+        prior_boss.stage = Some("Stage_Prior".to_owned());
+        prior_boss.boss = Some("PriorBoss".to_owned());
+        prior_boss.phase = Some(BOSS_PROGRESS_ANCHORS[10]);
+        prior_boss.session_id = Some(42);
+        engine.ingest(prior_boss);
+        engine.ingest(event(3, EventKind::DamageDealt, 500.0));
+
+        let mut new_session_boss = event(4, EventKind::BossStarted, 0.0);
+        new_session_boss.stage = Some("Stage_NewRun".to_owned());
+        new_session_boss.boss = Some("NewRunBoss".to_owned());
+        new_session_boss.phase = Some(0.0);
+        new_session_boss.session_id = Some(77);
+        engine.ingest(new_session_boss);
+
+        let recovered = engine.snapshot();
+        assert_eq!(recovered.session_id, Some(77));
+        assert_eq!(recovered.stage.as_deref(), Some("Stage_NewRun"));
+        assert_eq!(recovered.encounter.name, "NewRunBoss");
+        assert_eq!(recovered.outgoing.total, 0.0);
+        assert_eq!(recovered.run_context.progress, Some(0.0));
+        assert_eq!(recovered.run_context.boss_number, Some(1));
+        assert!(recovered.run_context.boss_number_inferred);
+    }
+
+    #[test]
+    fn jimbringer_name_is_an_authoritative_final_boss_marker() {
+        let mut engine = CombatEngine::new();
+        let mut boss = event(1, EventKind::BossStarted, 0.0);
+        boss.stage = None;
+        boss.boss = Some("JimBringerPhase2".to_owned());
+        // Audited late/replayed Bringer lines can carry zero despite being the final stage.
+        boss.phase = Some(0.0);
+        engine.ingest(boss);
+
+        let context = engine.snapshot().run_context;
+        assert_eq!(context.progress, Some(1.0));
+        assert_eq!(context.phase_name.as_deref(), Some("ECLIPSE"));
+        assert_eq!(context.boss_number, Some(13));
+        assert!(!context.boss_number_inferred);
+        assert_eq!(context.boss_subphase, Some(2));
+    }
+
+    #[test]
+    fn run_progress_rollback_starts_a_fresh_exact_count() {
+        let mut engine = CombatEngine::new();
+        engine.ingest(stage_event(1, "Stage_Late", BOSS_PROGRESS_ANCHORS[8]));
+        assert_eq!(engine.snapshot().run_context.boss_number, Some(9));
+        assert!(engine.snapshot().run_context.boss_number_inferred);
+
+        engine.ingest(stage_event(2, "Stage_Hall of Beginnings", 0.0));
+        let restarted = engine.snapshot().run_context;
+        assert_eq!(restarted.progress, Some(0.0));
+        assert_eq!(restarted.phase_name.as_deref(), Some("PRIME"));
+        assert_eq!(restarted.boss_number, Some(1));
+        assert!(!restarted.boss_number_inferred);
+
+        engine.ingest(stage_event(3, "Stage_Second", BOSS_PROGRESS_ANCHORS[1]));
+        let second = engine.snapshot().run_context;
+        assert_eq!(second.boss_number, Some(2));
+        assert!(!second.boss_number_inferred);
+    }
+
+    #[test]
+    fn lobby_and_world_boundaries_clear_run_context_while_intermission_retains_progress() {
+        let mut engine = CombatEngine::new();
+        engine.ingest(stage_event(1, "Stage_Test", BOSS_PROGRESS_ANCHORS[5]));
+        let mut phase_two = event(2, EventKind::BossStarted, 0.0);
+        phase_two.boss = Some("TestBossPhase2".to_owned());
+        phase_two.phase = Some(BOSS_PROGRESS_ANCHORS[5]);
+        engine.ingest(phase_two);
+        engine.ingest(event(3, EventKind::Intermission, 0.0));
+        let intermission = engine.snapshot().run_context;
+        assert_eq!(intermission.boss_number, Some(6));
+        assert_eq!(intermission.progress, Some(BOSS_PROGRESS_ANCHORS[5]));
+        assert_eq!(intermission.boss_subphase, None);
+
+        engine.ingest(visit_event(4, EventKind::SessionSaved, Some(42)));
+        let saved = engine.snapshot();
+        assert_eq!(saved.run_context.boss_number, Some(6));
+        assert!(!saved.loadout.available);
+        assert!(saved.loadout.items.is_empty());
+        assert!(saved.loadout.source_note.contains("does not expose"));
+
+        engine.ingest(event(5, EventKind::Lobby, 0.0));
+        assert_eq!(engine.snapshot().run_context, RunContext::default());
+
+        engine.ingest(stage_event(6, "Stage_New", 0.0));
+        engine.ingest(event(7, EventKind::WorldExited, 0.0));
+        assert_eq!(engine.snapshot().run_context, RunContext::default());
+
+        engine.ingest(stage_event(8, "Stage_Recovered", BOSS_PROGRESS_ANCHORS[3]));
+        engine.ingest(visit_event(9, EventKind::WorldEntered, None));
+        assert_eq!(engine.snapshot().run_context, RunContext::default());
+    }
+
+    #[test]
+    fn additive_snapshot_fields_deserialize_from_older_payloads() {
+        let mut value = serde_json::to_value(EngineSnapshot::default()).unwrap();
+        let object = value.as_object_mut().unwrap();
+        object.remove("run_context");
+        object.remove("loadout");
+
+        let decoded: EngineSnapshot = serde_json::from_value(value).unwrap();
+        assert_eq!(decoded.run_context, RunContext::default());
+        assert_eq!(decoded.loadout, LoadoutState::default());
     }
 
     #[test]

@@ -497,13 +497,22 @@ fn apply_compatibility_aliases(base: &mut Value, patch: &Value) {
                 }
                 if let Some(show) = object.get("show").and_then(Value::as_array) {
                     let has = |name: &str| show.iter().any(|value| value.as_str() == Some(name));
+                    let legacy_run_context = object
+                        .get("schema_version")
+                        .or_else(|| object.get("ui"))
+                        .and_then(Value::as_u64)
+                        != Some(2)
+                        && has("encounter");
                     profile["show_dps"] = Value::Bool(has("dps"));
                     profile["show_damage"] = Value::Bool(has("damage"));
                     profile["show_incoming"] = Value::Bool(has("incoming"));
                     profile["show_hits"] = Value::Bool(has("hits"));
                     profile["show_recent_hits"] = Value::Bool(has("recent_hits") || has("hits"));
                     profile["show_encounter"] = Value::Bool(has("encounter"));
+                    profile["show_phase"] = Value::Bool(has("phase") || legacy_run_context);
+                    profile["show_boss_number"] = Value::Bool(has("boss") || legacy_run_context);
                     profile["show_focus"] = Value::Bool(has("focus"));
+                    profile["show_loadout"] = Value::Bool(has("loadout"));
                 }
             }
 
@@ -531,7 +540,14 @@ fn apply_compatibility_aliases(base: &mut Value, patch: &Value) {
             }
             if let Some(show) = object.get("show").and_then(Value::as_array) {
                 let has = |name: &str| show.iter().any(|value| value.as_str() == Some(name));
-                let shows_player_metric = has("dps") || has("damage") || has("incoming");
+                let legacy_run_context = object
+                    .get("schema_version")
+                    .or_else(|| object.get("ui"))
+                    .and_then(Value::as_u64)
+                    != Some(2)
+                    && has("encounter");
+                let shows_outgoing_metric = has("dps") || has("damage");
+                let shows_player_metric = shows_outgoing_metric || has("incoming");
                 base["vr_overlay"]["show_rolling_dps"] = Value::Bool(has("dps"));
                 base["vr_overlay"]["show_total_damage"] = Value::Bool(has("damage"));
                 base["vr_overlay"]["show_incoming"] = Value::Bool(has("incoming"));
@@ -539,8 +555,12 @@ fn apply_compatibility_aliases(base: &mut Value, patch: &Value) {
                 base["vr_overlay"]["show_recent_hits"] =
                     Value::Bool(has("recent_hits") || has("hits"));
                 base["vr_overlay"]["show_encounter"] = Value::Bool(has("encounter"));
+                base["vr_overlay"]["show_phase"] = Value::Bool(has("phase") || legacy_run_context);
+                base["vr_overlay"]["show_boss_number"] =
+                    Value::Bool(has("boss") || legacy_run_context);
                 base["vr_overlay"]["show_focus"] = Value::Bool(has("focus"));
-                base["vr_overlay"]["show_attacks"] = Value::Bool(shows_player_metric);
+                base["vr_overlay"]["show_loadout"] = Value::Bool(has("loadout"));
+                base["vr_overlay"]["show_attacks"] = Value::Bool(shows_outgoing_metric);
             }
         }
     }
@@ -771,6 +791,208 @@ mod tests {
         assert!(overlay_boot.contains("makeOverlayWaitingLive"));
         assert!(!overlay_boot.contains("makeMockLive"));
         assert!(!overlay_boot.contains("startDemoClock"));
+    }
+
+    #[test]
+    fn main_live_runtime_uses_real_or_idle_data_and_clears_on_stream_loss() {
+        let load_start = APP_JS
+            .find("async function loadInitialData()")
+            .expect("the main data bootstrap should exist");
+        let load_end = APP_JS[load_start..]
+            .find("function updateConnectionUI")
+            .map(|offset| load_start + offset)
+            .expect("connection rendering should follow the bootstrap");
+        let bootstrap = &APP_JS[load_start..load_end];
+        let stream_start = APP_JS
+            .find("function connectStream")
+            .expect("the stream connector should exist");
+        let stream_end = APP_JS[stream_start..]
+            .find("async function refreshRuns")
+            .map(|offset| stream_start + offset)
+            .expect("run refresh should follow the stream connector");
+        let stream = &APP_JS[stream_start..stream_end];
+
+        assert!(bootstrap.contains("makeOverlayWaitingLive(state.apiOnline)"));
+        assert!(bootstrap.contains("state.usingMock = false"));
+        assert!(!bootstrap.contains("makeMockLive"));
+        assert!(!bootstrap.contains("makeMockRuns"));
+        assert!(stream.contains("clearLiveOnError"));
+        assert!(stream.contains("state.live = makeOverlayWaitingLive(false)"));
+        assert!(stream.contains("state.lastLiveAt = 0"));
+    }
+
+    #[test]
+    fn studio_hydrates_backend_profile_and_disables_unavailable_loadout_control() {
+        let hydrate_start = APP_JS
+            .find("function studioOptionsFromSettings")
+            .expect("backend Studio hydration should exist");
+        let hydrate_end = APP_JS[hydrate_start..]
+            .find("async function setOutputEnabled")
+            .map(|offset| hydrate_start + offset)
+            .expect("output controls should follow Studio hydration");
+        let hydration = &APP_JS[hydrate_start..hydrate_end];
+
+        assert!(hydration.contains("state.settings?.overlay_profiles"));
+        assert!(hydration.contains("studioOptionsFromSettings() || local"));
+        assert!(hydration.contains("!input.disabled"));
+        assert!(APP_JS.contains("function queueOverlayProfileSave(options)"));
+        assert!(!APP_JS.contains("if (!outputsEnabled()) return"));
+        assert!(hydration.contains("profile.accent === \"#8ff0cf\" ? \"mint\""));
+        assert!(INDEX_HTML.contains("Loadout unavailable (not logged)"));
+        assert!(INDEX_HTML.contains("value=\"loadout\" disabled"));
+    }
+
+    #[test]
+    fn legacy_obs_only_studio_profile_migrates_before_backend_becomes_canonical() {
+        let hydrate_start = APP_JS
+            .find("function applySavedStudioOptions")
+            .expect("Studio saved-option hydration should exist");
+        let hydrate_end = APP_JS[hydrate_start..]
+            .find("async function setOutputEnabled")
+            .map(|offset| hydrate_start + offset)
+            .expect("output controls should follow saved-option hydration");
+        let hydration = &APP_JS[hydrate_start..hydrate_end];
+        let save_start = APP_JS
+            .find("function queueOverlayProfileSave")
+            .expect("Studio backend save should exist");
+        let save_end = APP_JS[save_start..]
+            .find("function studioOptionsFromSettings")
+            .map(|offset| save_start + offset)
+            .expect("backend hydration should follow the save helpers");
+        let save_helpers = &APP_JS[save_start..save_end];
+
+        assert!(hydration.contains("localVersion < OVERLAY_SETTINGS_VERSION"));
+        assert!(hydration.contains("Boolean(local?.backendPending)"));
+        assert!(hydration
+            .contains("migrateLocal || retryLocal ? local : studioOptionsFromSettings() || local"));
+        assert!(hydration.contains("restoredShow.add(\"phase\")"));
+        assert!(hydration.contains("restoredShow.add(\"boss\")"));
+        assert!(hydration.contains("queueOverlayProfileSave(migrated)"));
+        assert!(save_helpers.contains("backendPending: state.studioBackendPending"));
+        assert!(save_helpers.contains("state.studioBackendPending = false"));
+        assert!(save_helpers.contains("state.profileSavePendingOptions = { ...options }"));
+        assert!(save_helpers
+            .contains("if (state.profileSaveInFlight || !state.profileSavePendingOptions) return"));
+        assert!(save_helpers.contains("if (!state.profileSavePendingOptions)"));
+        assert!(save_helpers
+            .contains("state.profileSaveTimer = setTimeout(flushOverlayProfileSave, 0)"));
+    }
+
+    #[test]
+    fn browser_overlay_urls_are_versioned_and_legacy_encounter_urls_gain_run_context() {
+        let options_start = APP_JS
+            .find("function overlayOptionsFromSearch")
+            .expect("the overlay URL parser should exist");
+        let options_end = APP_JS[options_start..]
+            .find("function renderCombatOverlay")
+            .map(|offset| options_start + offset)
+            .expect("the overlay renderer should follow its URL parser");
+        let options_parser = &APP_JS[options_start..options_end];
+        let url_start = APP_JS
+            .find("function overlayUrl")
+            .expect("the Studio URL builder should exist");
+        let url_end = APP_JS[url_start..]
+            .find("function renderVrStatus")
+            .map(|offset| url_start + offset)
+            .expect("VR status rendering should follow the URL builder");
+        let url_builder = &APP_JS[url_start..url_end];
+
+        assert!(APP_JS.contains("const OVERLAY_SETTINGS_VERSION = 2"));
+        assert!(url_builder.contains("params.set(\"ui\", OVERLAY_SETTINGS_VERSION)"));
+        assert!(options_parser.contains("params.get(\"ui\") !== String(OVERLAY_SETTINGS_VERSION)"));
+        assert!(options_parser.contains("params.has(\"show\")"));
+        assert!(options_parser.contains("parsedShow.includes(\"encounter\")"));
+        assert!(options_parser.contains("parsedShow.push(\"phase\")"));
+        assert!(options_parser.contains("parsedShow.push(\"boss\")"));
+    }
+
+    #[test]
+    fn browser_overlay_allows_context_only_and_explicitly_empty_visibility() {
+        let options_start = APP_JS
+            .find("function overlayOptionsFromSearch")
+            .expect("the overlay URL parser should exist");
+        let options_end = APP_JS[options_start..]
+            .find("function metricValue")
+            .map(|offset| options_start + offset)
+            .expect("the metric helper should follow the URL parser");
+        let options_parser = &APP_JS[options_start..options_end];
+        let render_start = APP_JS
+            .find("function renderCombatOverlay")
+            .expect("the overlay renderer should exist");
+        let render_end = APP_JS[render_start..]
+            .find("function hexToRgb")
+            .map(|offset| render_start + offset)
+            .expect("the color helper should follow the overlay renderer");
+        let renderer = &APP_JS[render_start..render_end];
+
+        assert!(options_parser.contains("const hasShow = params.has(\"show\")"));
+        assert!(options_parser.contains("const parsedShow = hasShow ? showRaw.split"));
+        assert!(!renderer.contains("metrics.push(\"dps\")"));
+        assert!(renderer.contains("const primaryMetric = metrics[0] || null"));
+        assert!(renderer.contains("const totalsWidget = totals.length"));
+        assert!(renderer.contains("const rosterWidget = primaryMetric"));
+    }
+
+    #[test]
+    fn overlay_patch_schema_distinguishes_legacy_inheritance_from_explicit_controls() {
+        fn profile(base: &Value) -> &Value {
+            base["overlay_profiles"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|profile| profile["id"] == "broadcast")
+                .unwrap()
+        }
+
+        let apply = |schema_version: Option<u64>, show: Vec<&str>| {
+            let mut base = serde_json::to_value(AppConfig::default()).unwrap();
+            let mut overlay = json!({ "show": show });
+            if let Some(schema_version) = schema_version {
+                overlay["schema_version"] = json!(schema_version);
+            }
+            let patch = json!({ "overlay": overlay });
+            apply_compatibility_aliases(&mut base, &patch);
+            base
+        };
+
+        let legacy = apply(None, vec!["encounter"]);
+        assert_eq!(profile(&legacy)["show_phase"], true);
+        assert_eq!(profile(&legacy)["show_boss_number"], true);
+        assert_eq!(profile(&legacy)["show_loadout"], false);
+        assert_eq!(legacy["vr_overlay"]["show_phase"], true);
+        assert_eq!(legacy["vr_overlay"]["show_boss_number"], true);
+        assert_eq!(legacy["vr_overlay"]["show_loadout"], false);
+
+        let explicit = apply(Some(2), vec!["encounter"]);
+        assert_eq!(profile(&explicit)["show_phase"], false);
+        assert_eq!(profile(&explicit)["show_boss_number"], false);
+        assert_eq!(profile(&explicit)["show_loadout"], false);
+        assert_eq!(explicit["vr_overlay"]["show_phase"], false);
+        assert_eq!(explicit["vr_overlay"]["show_boss_number"], false);
+        assert_eq!(explicit["vr_overlay"]["show_loadout"], false);
+
+        let loadout = apply(Some(2), vec!["encounter", "phase", "boss", "loadout"]);
+        assert_eq!(profile(&loadout)["show_phase"], true);
+        assert_eq!(profile(&loadout)["show_boss_number"], true);
+        assert_eq!(profile(&loadout)["show_loadout"], true);
+        assert_eq!(loadout["vr_overlay"]["show_phase"], true);
+        assert_eq!(loadout["vr_overlay"]["show_boss_number"], true);
+        assert_eq!(loadout["vr_overlay"]["show_loadout"], true);
+
+        let context_only = apply(Some(2), vec!["phase", "boss", "hits", "focus"]);
+        assert_eq!(profile(&context_only)["show_dps"], false);
+        assert_eq!(profile(&context_only)["show_damage"], false);
+        assert_eq!(context_only["vr_overlay"]["show_players"], false);
+        assert_eq!(context_only["vr_overlay"]["show_attacks"], false);
+        assert_eq!(context_only["vr_overlay"]["show_rolling_dps"], false);
+        assert_eq!(context_only["vr_overlay"]["show_total_damage"], false);
+
+        let incoming_only = apply(Some(2), vec!["incoming"]);
+        assert_eq!(incoming_only["vr_overlay"]["show_incoming"], true);
+        assert_eq!(incoming_only["vr_overlay"]["show_players"], true);
+        assert_eq!(incoming_only["vr_overlay"]["show_attacks"], false);
+        assert_eq!(incoming_only["vr_overlay"]["show_rolling_dps"], false);
+        assert_eq!(incoming_only["vr_overlay"]["show_total_damage"], false);
     }
 
     #[test]

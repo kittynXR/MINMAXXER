@@ -7,6 +7,9 @@ pub mod aggregate;
 pub mod model;
 pub mod parser;
 
-pub use aggregate::{analyze_runs, events_for_run, CombatEngine, EngineSnapshot};
+pub use aggregate::{
+    analyze_runs, events_for_run, CombatEngine, EngineSnapshot, LoadoutItem, LoadoutState,
+    RunContext,
+};
 pub use model::*;
 pub use parser::{parse_log_line, EclipticaParser, ParseOutcome};

@@ -140,9 +140,13 @@ fn overlay_url(origin: &Url, runtime: &DesktopOverlayRuntimeConfig) -> Url {
         "broadcast" | "minimal" | "vr" => profile.id.as_str(),
         _ => "broadcast",
     };
-    let layout = match profile.layout.as_str() {
-        "leaderboard" | "compact" | "ticker" | "hits" => profile.layout.as_str(),
-        _ => "leaderboard",
+    // The click-through desktop surface has a fixed viewport and cannot scroll. Preserve the
+    // dedicated hit-feed choice, but normalize table/ticker choices to a compact composition so
+    // phase, boss, target, players, and recent hits all remain visible at the 520x300 default.
+    let layout = if profile.layout == "hits" {
+        "hits"
+    } else {
+        "compact"
     };
     let theme = match profile.theme.as_str() {
         "void" | "glass" => profile.theme.as_str(),
@@ -166,11 +170,20 @@ fn overlay_url(origin: &Url, runtime: &DesktopOverlayRuntimeConfig) -> Url {
     if profile.show_encounter {
         show.push("encounter");
     }
+    if profile.show_phase {
+        show.push("phase");
+    }
+    if profile.show_boss_number {
+        show.push("boss");
+    }
     if profile.show_hits || profile.show_recent_hits {
         show.push("hits");
     }
     if profile.show_focus {
         show.push("focus");
+    }
+    if profile.show_loadout {
+        show.push("loadout");
     }
 
     let mut url = origin.clone();
@@ -178,21 +191,28 @@ fn overlay_url(origin: &Url, runtime: &DesktopOverlayRuntimeConfig) -> Url {
     url.set_query(None);
     url.query_pairs_mut()
         .append_pair("surface", "desktop")
+        .append_pair("ui", "2")
         .append_pair("profile", renderer_profile)
         .append_pair("layout", layout)
         .append_pair("theme", theme)
         .append_pair("accent", accent)
-        .append_pair("rows", &profile.rows.clamp(1, 8).to_string())
-        .append_pair("hit_rows", &profile.recent_hit_rows.clamp(1, 8).to_string())
+        .append_pair(
+            "rows",
+            &profile
+                .rows
+                .clamp(1, if profile.show_loadout { 1 } else { 2 })
+                .to_string(),
+        )
+        .append_pair("hit_rows", &profile.recent_hit_rows.clamp(1, 2).to_string())
         .append_pair("show", &show.join(","))
         .append_pair(
             "bg",
             &format!("{:.0}", settings.opacity.clamp(0.0, 1.0) * 100.0),
         )
-        .append_pair(
-            "scale",
-            &format!("{:.0}", profile.scale.clamp(0.7, 1.6) * 100.0),
-        );
+        // The desktop WebView has a fixed, intentionally tiny footprint. Browser-source scale
+        // remains configurable, but the desktop surface renders at 100% so transforms cannot
+        // clip the context and recent-hit rows outside that window.
+        .append_pair("scale", "100");
     url
 }
 
@@ -289,12 +309,35 @@ mod tests {
         let runtime = DesktopOverlayRuntimeConfig::from_app_config(&config);
         let url = overlay_url(&Url::parse("http://127.0.0.1:49321").unwrap(), &runtime);
         let query: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
+        let show: std::collections::HashSet<_> = query.get("show").unwrap().split(',').collect();
+        assert_eq!(query.get("ui").map(String::as_str), Some("2"));
         assert_eq!(query.get("profile").map(String::as_str), Some("broadcast"));
+        assert_eq!(query.get("layout").map(String::as_str), Some("compact"));
+        assert_eq!(query.get("rows").map(String::as_str), Some("2"));
+        assert_eq!(query.get("hit_rows").map(String::as_str), Some("2"));
+        assert_eq!(query.get("scale").map(String::as_str), Some("100"));
         assert_eq!(query.get("bg").map(String::as_str), Some("64"));
-        assert!(query
-            .get("show")
-            .unwrap()
-            .split(',')
-            .any(|item| item == "focus"));
+        assert!(show.contains("encounter"));
+        assert!(show.contains("phase"));
+        assert!(show.contains("boss"));
+        assert!(show.contains("focus"));
+        assert!(!show.contains("loadout"));
+    }
+
+    #[test]
+    fn desktop_url_only_includes_loadout_after_profile_opt_in() {
+        let mut config = AppConfig::default();
+        config.overlay_profiles[0].show_loadout = true;
+        let runtime = DesktopOverlayRuntimeConfig::from_app_config(&config);
+        let url = overlay_url(&Url::parse("http://127.0.0.1:49321").unwrap(), &runtime);
+        let show = url
+            .query_pairs()
+            .find(|(key, _)| key == "show")
+            .map(|(_, value)| value.into_owned())
+            .unwrap();
+        let query: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
+
+        assert!(show.split(',').any(|item| item == "loadout"));
+        assert_eq!(query.get("rows").map(String::as_str), Some("1"));
     }
 }

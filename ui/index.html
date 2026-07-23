@@ -82,7 +82,9 @@
             </div>
             <div class="hero-control">
               <span>COUNTING <b id="liveCombatScope">WAITING FOR BOSS</b></span>
-              <span>RUN <b id="runNumber">—</b></span>
+              <span>RUN PHASE <b id="runPhase">—</b></span>
+              <span>CURRENT BOSS <b id="bossNumber">—</b></span>
+              <span>LOADOUT <b id="loadoutStatus">NOT EXPOSED</b></span>
             </div>
           </div>
 
@@ -265,16 +267,16 @@
                   <fieldset><legend>Accent</legend><div class="color-options" id="accentOptions"><button class="active" data-accent="cyan" style="--swatch:#54e6ff" aria-label="Cyan"></button><button data-accent="mint" style="--swatch:#65f2b8" aria-label="Mint"></button><button data-accent="violet" style="--swatch:#ad8cff" aria-label="Violet"></button><button data-accent="amber" style="--swatch:#ffc45c" aria-label="Amber"></button><button data-accent="rose" style="--swatch:#ff719a" aria-label="Rose"></button></div></fieldset>
                   <label class="bg-control"><span>Background <output id="overlayBgValue">78%</output></span><input type="range" id="overlayBg" min="0" max="100" value="78"></label>
                 </div>
-                <fieldset class="show-options"><legend>Visible data</legend><label><input type="checkbox" value="dps" checked><span></span>Boss DPS</label><label><input type="checkbox" value="damage" checked><span></span>Boss damage</label><label><input type="checkbox" value="incoming"><span></span>Incoming</label><label><input type="checkbox" value="encounter" checked><span></span>Encounter</label><label><input type="checkbox" value="hits" checked><span></span>Recent hits</label><label><input type="checkbox" value="focus" checked><span></span>Boss target?</label></fieldset>
+                <fieldset class="show-options"><legend>Visible data</legend><label><input type="checkbox" value="dps" checked><span></span>Boss DPS</label><label><input type="checkbox" value="damage" checked><span></span>Boss damage</label><label><input type="checkbox" value="incoming"><span></span>Incoming</label><label><input type="checkbox" value="encounter" checked><span></span>Encounter</label><label><input type="checkbox" value="phase" checked><span></span>Run phase</label><label><input type="checkbox" value="boss" checked><span></span>Boss #</label><label><input type="checkbox" value="hits" checked><span></span>Recent hits</label><label><input type="checkbox" value="focus" checked><span></span>Boss target?</label><label title="The audited Ecliptica log does not expose shop item names or stack counts, so this cannot be enabled automatically."><input type="checkbox" value="loadout" disabled><span></span>Loadout unavailable (not logged)</label></fieldset>
               </article>
 
               <article class="panel control-section output-section">
-                <header><span class="step-index">03</span><div><h2>Send it somewhere</h2><p>Each output can use its own profile and position.</p></div></header>
+                <header><span class="step-index">03</span><div><h2>Send it somewhere</h2><p>OBS uses the selected layout; native outputs adapt it to their fixed HUD surfaces.</p></div></header>
                 <div class="output-cards">
                   <div class="output-card obs-card"><div class="output-icon">OBS</div><div><strong>OBS browser source</strong><small>Transparent web output · recommended 720 × 480</small></div><span class="ready-pill">READY</span></div>
                   <div class="url-copy"><input id="obsUrl" readonly aria-label="OBS browser source URL"><button id="copyObsUrl">Copy for OBS</button></div>
                   <p class="obs-paste-hint"><strong>In OBS:</strong> click the URL field, press <kbd>Ctrl+A</kbd>, then paste. Replace the entire default <code>https://obsproject.com/browser-source</code> address.</p>
-                  <div class="output-card"><div class="output-icon desktop-icon">▣</div><div><strong>Desktop overlay</strong><small>Click-through layer above VRChat while in desktop mode</small></div><button class="switch" id="desktopOverlayToggle" role="switch" aria-checked="false"><i></i></button></div>
+                  <div class="output-card"><div class="output-icon desktop-icon">▣</div><div><strong>Desktop overlay</strong><small>Auto-fit compact HUD at 100% · up to 2 players and 2 hits (1 player when the limitation panel is forced by config)</small></div><button class="switch" id="desktopOverlayToggle" role="switch" aria-checked="false"><i></i></button></div>
                   <div class="grab-control"><div><strong>Show desktop HUD with a detected headset</strong><small>Enable this if a connected but idle headset would otherwise hide the desktop overlay.</small></div><button class="switch" id="desktopHeadsetToggle" type="button" role="switch" aria-checked="false" aria-label="Show desktop overlay when a headset is detected"><i></i></button></div>
                   <div class="output-card"><div class="output-icon vr-icon">VR</div><div><strong>VR overlay</strong><small id="vrOverlayStatus">OpenVR panel with saved coordinates or optional controller placement</small></div><button class="switch" id="vrOverlayToggle" role="switch" aria-checked="false"><i></i></button></div>
                   <div class="vr-placement" id="vrPlacementControls">
@@ -296,7 +298,7 @@
               </article>
 
               <aside class="capability-note">
-                <span aria-hidden="true">i</span><p><strong>Honest about the log.</strong> MINMAXXER can only report events Ecliptica writes to the VRChat log. Absorbs, positions, and effect ownership may be unavailable. “Boss target?” combines boss activity and network-ownership evidence; it is useful for awareness but is not an authoritative hate table.</p>
+                <span aria-hidden="true">i</span><p><strong>Honest about the log.</strong> Phase uses a documented third-party progress-band convention over Ecliptica's numeric log value; boss number comes from stage markers. The audited build does not print shop item names or stack counts, so loadout stays unavailable instead of being guessed. “Boss target?” combines boss activity and network-ownership evidence; it is useful for awareness but is not an authoritative hate table.</p>
               </aside>
             </div>
 

@@ -18,6 +18,7 @@
     amber: ["#ffc45c", "255,196,92"], rose: ["#ff719a", "255,113,154"]
   };
   const titles = { live: "LIVE ENCOUNTER", runs: "RUN HISTORY", compare: "COMPARE RUNS", analysis: "DEEP ANALYSIS", events: "EVENT EXPLORER", overlay: "OVERLAY STUDIO" };
+  const OVERLAY_SETTINGS_VERSION = 2;
 
   const state = {
     live: null,
@@ -42,6 +43,9 @@
     timers: [],
     charts: {},
     profileSaveTimer: null,
+    profileSaveInFlight: false,
+    profileSavePendingOptions: null,
+    studioBackendPending: false,
     lastLiveAt: 0,
     archiveRefreshTimer: null,
     archiveBootstrapRetryTimer: null,
@@ -92,6 +96,8 @@
       stage: "Umbra Citadel · Depth 4",
       className: "Void Dancer",
       sourceFile: "output_log_demo.txt",
+      runContext: { progress: null, phaseName: "", bossNumber: null, bossNumberInferred: false, bossSubphase: null },
+      loadout: { available: false, items: [], sourceNote: "Ecliptica does not expose shop item names or stack counts in the audited VRChat log." },
       encounter: { name: "Astral Sovereign", kind: "Boss", phase: "Phase 3 · Eclipse", duration, active: true, hpPercent: 27.4, hpCurrent: 8310000, hpMax: 30280000, shieldPercent: 9 },
       focus: { player: "Mirai", entity: "Astral Sovereign", ageSeconds: 1.2, confidence: "likely", evidence: "boss_owner_plus_local_incoming", corroboratingHits: 2, corroboratedAt: new Date().toISOString(), sourceNote: "Exact boss ownership plus immediate local incoming damage; still not an authoritative hate table." },
       outgoing: { total: 73903000, strike: 52600000, nonStrike: 21303000, hits: 1831, biggestHit: 388420, dps: 184220, rolling5s: 216300, rolling15s: 196100, rolling30s: 188700 },
@@ -314,6 +320,17 @@
     };
   }
 
+  function phaseNameFromProgress(value) {
+    if (value === null || value === undefined || value === "") return "";
+    const progress = Number(value);
+    if (!Number.isFinite(progress) || progress < 0 || progress > 1.000001) return "";
+    if (progress < .2) return "PRIME";
+    if (progress < .4) return "PENUMBRA";
+    if (progress < .6) return "ANTUMBRA";
+    if (progress < .8) return "UMBRA";
+    return "ECLIPSE";
+  }
+
   function normalizeLive(payload, fallback = makeMockLive()) {
     if (!payload || typeof payload !== "object") return fallback;
     const src = payload.live ?? payload.snapshot ?? payload.data ?? payload;
@@ -339,12 +356,26 @@
     const effectsRaw = src.effects ?? src.active_effects ?? src.buffs ?? (isRealSnapshot ? [] : fallback.effects);
     const eventsRaw = src.recent_events ?? src.recentEvents ?? (isRealSnapshot ? [] : fallback.recentEvents);
     const hitsRaw = src.recent_hits ?? src.recentHits ?? [];
+    const runContextRaw = src.run_context ?? src.runContext ?? {};
+    const progressCandidate = runContextRaw.progress ?? encounterRaw.phase ?? src.phase;
+    const parsedProgress = Number(progressCandidate);
+    const runProgress = progressCandidate !== null && progressCandidate !== undefined && progressCandidate !== "" && Number.isFinite(parsedProgress) && parsedProgress >= 0 && parsedProgress <= 1.000001 ? clamp(parsedProgress, 0, 1) : null;
+    const loadoutRaw = src.loadout ?? {};
+    const loadoutItems = Array.isArray(loadoutRaw.items) ? loadoutRaw.items.map((item) => ({ name: String(item.name ?? item.display_name ?? item.id ?? "Unknown item"), stacks: Math.max(1, Math.round(number(item.stacks, 1))) })) : [];
     return {
       ...fallback, ...src,
       version: src.version ?? fallback.version,
       connected: Boolean(src.connected ?? true), inWorld: Boolean(src.in_world ?? src.inWorld ?? (src.version === undefined ? fallback.inWorld : false)), status: String(src.status ?? "watching"), observedPlayer: String(observed ?? ""),
       sessionId: String(src.session_id ?? src.sessionId ?? (src.version !== undefined ? "—" : fallback.sessionId)), world: String(src.world ?? (src.version !== undefined ? "Waiting for Ecliptica" : fallback.world)), stage: String(src.stage ?? (src.version !== undefined ? "No stage detected" : fallback.stage)),
       className: String(src.class_name ?? src.className ?? (src.version !== undefined ? "Unknown class" : fallback.className)), sourceFile: String(src.source_file ?? src.sourceFile ?? (src.version !== undefined ? "No active log file" : fallback.sourceFile)),
+      runContext: {
+        progress: runProgress,
+        phaseName: String(runContextRaw.phase_name ?? runContextRaw.phaseName ?? phaseNameFromProgress(runProgress) ?? ""),
+        bossNumber: Number.isFinite(Number(runContextRaw.boss_number ?? runContextRaw.bossNumber)) ? Number(runContextRaw.boss_number ?? runContextRaw.bossNumber) : null,
+        bossNumberInferred: Boolean(runContextRaw.boss_number_inferred ?? runContextRaw.bossNumberInferred),
+        bossSubphase: Number.isFinite(Number(runContextRaw.boss_subphase ?? runContextRaw.bossSubphase)) ? Number(runContextRaw.boss_subphase ?? runContextRaw.bossSubphase) : null
+      },
+      loadout: { available: Boolean(loadoutRaw.available), items: loadoutItems, sourceNote: String(loadoutRaw.source_note ?? loadoutRaw.sourceNote ?? "Ecliptica does not expose shop item names or stack counts in the audited VRChat log.") },
       encounter: {
         ...fallback.encounter, ...encounterRaw,
         name: String(encounterRaw.name || (src.version !== undefined ? "No active encounter" : fallback.encounter.name)), kind: String(encounterRaw.kind || (src.version !== undefined ? "Waiting" : fallback.encounter.kind)),
@@ -509,20 +540,20 @@
   }
 
   async function loadInitialData() {
-    const mockLive = makeMockLive();
     const requests = await Promise.allSettled([api("/api/live"), api("/api/runs"), api("/api/settings"), api("/api/health", {}, 1000), api("/api/vr-status", {}, 1000)]);
     const livePayload = requests[0].status === "fulfilled" ? requests[0].value : null;
-    state.live = normalizeLive(livePayload, mockLive);
-    state.lastLiveAt = Date.now();
     state.apiOnline = requests[3].status === "fulfilled" || requests[0].status === "fulfilled";
-    state.usingMock = !livePayload;
+    state.live = livePayload ? normalizeLive(livePayload, makeOverlayWaitingLive(true)) : makeOverlayWaitingLive(state.apiOnline);
+    state.lastLiveAt = livePayload ? Date.now() : 0;
+    // The main LIVE page never substitutes demo combat for missing telemetry. Demo factories are
+    // retained only for static design fixtures; runtime state is always real or explicitly idle.
+    state.usingMock = false;
     const runsPayload = requests[1].status === "fulfilled" ? requests[1].value : null;
     const rawRuns = Array.isArray(runsPayload) ? runsPayload : runsPayload?.runs ?? runsPayload?.items ?? [];
-    state.runs = rawRuns.length ? rawRuns.map((run, i) => normalizeRun(run, i, state.live)) : state.usingMock ? makeMockRuns(state.live) : [];
+    state.runs = rawRuns.map((run, i) => normalizeRun(run, i, state.live));
     state.settings = requests[2].status === "fulfilled" && requests[2].value && typeof requests[2].value === "object" ? requests[2].value : {};
     state.vrStatus = requests[4].status === "fulfilled" ? requests[4].value : null;
-    state.events = state.live.recentEvents.length ? state.live.recentEvents : state.usingMock ? mockEvents() : [];
-    if (state.events.length < 40 && state.usingMock) state.events = mockEvents();
+    state.events = state.live.recentEvents.length ? state.live.recentEvents : [];
     state.selectedRunId = state.runs[0]?.id ?? null;
     updateConnectionUI();
   }
@@ -589,7 +620,7 @@
     }, 4000);
   }
 
-  function connectStream(onLive, { refreshArchive = false, onStreamState = null } = {}) {
+  function connectStream(onLive, { refreshArchive = false, onStreamState = null, clearLiveOnError = false } = {}) {
     if (!("EventSource" in window)) return;
     const stream = new EventSource("/api/stream");
     stream.addEventListener("open", () => {
@@ -601,7 +632,17 @@
         scheduleArchiveBootstrapRetry();
       }
     });
-    stream.addEventListener("error", () => { state.streamOnline = false; updateConnectionUI(); if (typeof onStreamState === "function") onStreamState("error"); });
+    stream.addEventListener("error", () => {
+      state.streamOnline = false;
+      if (clearLiveOnError) {
+        state.apiOnline = false;
+        state.live = makeOverlayWaitingLive(false);
+        state.lastLiveAt = 0;
+        if (!state.frozen) onLive();
+      }
+      updateConnectionUI();
+      if (typeof onStreamState === "function") onStreamState("error");
+    });
     stream.addEventListener("message", (message) => {
       try {
         const payload = JSON.parse(message.data);
@@ -713,17 +754,40 @@
     return { player: "NO ACTIVE BOSS", confidence: "idle", detail: scope.key === "pre-boss" ? "pre-boss combat excluded" : "waiting for boss", badge: "IDLE", note: "Target inference begins when a boss window is active." };
   }
 
+  function runPhasePresentation(live = state.live) {
+    const progress = live?.runContext?.progress;
+    const phaseName = live?.runContext?.phaseName || phaseNameFromProgress(progress) || "UNKNOWN";
+    const percent = Number.isFinite(progress) ? `${(progress * 100).toFixed(progress === 0 || progress === 1 ? 0 : 1)}%` : "PROGRESS UNKNOWN";
+    const finalEye = Number.isFinite(progress) && progress >= .999 && /bringer/i.test(`${live?.stage || ""} ${live?.encounter?.name || ""}`);
+    return { name: phaseName, percent, detail: finalEye ? `${phaseName} · EYE OF THE ECLIPSE` : `${phaseName} · ${percent}`, finalEye };
+  }
+
+  function bossNumberPresentation(live = state.live) {
+    const numberValue = live?.runContext?.bossNumber;
+    if (!Number.isFinite(numberValue) || numberValue < 1) return { short: "—", detail: "BOSS UNKNOWN", inferred: false, known: false };
+    const inferred = Boolean(live.runContext.bossNumberInferred);
+    const subphase = live.runContext.bossSubphase;
+    const short = `${inferred ? "~" : ""}#${String(Math.round(numberValue)).padStart(2, "0")}`;
+    return { short, detail: `BOSS ${short}${Number.isFinite(subphase) && subphase > 1 ? ` · FORM ${Math.round(subphase)}` : ""}`, inferred, known: true };
+  }
+
   function renderLive() {
     const live = state.live; if (!live) return;
+    const runPhase = runPhasePresentation(live);
+    const bossNumber = bossNumberPresentation(live);
     text("#encounterZone", `${live.stage || live.world}`);
     text("#encounterName", live.encounter.name);
-    text("#encounterPhase", live.encounter.phase || live.encounter.kind);
+    text("#encounterPhase", `${runPhase.detail} · ${bossNumber.detail}`);
     text("#encounterTimer", formatDuration(live.encounter.duration, true));
     text("#bossHpText", live.encounter.hpMax ? formatPercent(live.encounter.hpPercent) : "NOT LOGGED");
     text("#bossHpValue", live.encounter.hpMax ? `${formatCompact(live.encounter.hpCurrent, 2)} / ${formatCompact(live.encounter.hpMax, 2)}` : "Health not exposed by log");
     $("#bossHpBar").style.width = `${clamp(live.encounter.hpPercent, 0, 100)}%`;
     $("#bossShieldBar").style.width = `${clamp(live.encounter.shieldPercent, 0, 100)}%`;
-    text("#runNumber", `#${String(state.runs[0]?.number ?? live.sessionId?.split("-").pop() ?? "LIVE").padStart(4, "0")}`);
+    text("#runPhase", runPhase.finalEye ? "ECLIPSE · EYE" : `${runPhase.name} · ${runPhase.percent}`);
+    text("#bossNumber", `${bossNumber.short}${bossNumber.inferred ? " · INFERRED" : ""}`);
+    const loadoutItems = live.loadout?.items || [];
+    text("#loadoutStatus", live.loadout?.available ? (loadoutItems.length ? `${loadoutItems.length} ITEM${loadoutItems.length === 1 ? "" : "S"}` : "EMPTY") : "NOT EXPOSED");
+    if ($("#loadoutStatus")) $("#loadoutStatus").title = live.loadout?.available ? loadoutItems.map((item) => `${item.name} ×${item.stacks}`).join(" · ") || "Observed empty loadout" : live.loadout?.sourceNote || "Not available from the log.";
     const scope = liveCombatScope(live);
     text("#liveCombatScope", scope.label);
     $("#liveCombatScope")?.classList.toggle("excluded", scope.excluded);
@@ -1174,11 +1238,16 @@
   }
 
   function overlayOptionsFromSearch(search = location.search) {
-    const params = new URLSearchParams(search); const showRaw = params.get("show");
+    const params = new URLSearchParams(search); const hasShow = params.has("show"); const showRaw = params.get("show") ?? "";
     const hitMode = ["hits", "recent_hits"].includes(params.get("mode"));
-    const parsedShow = showRaw ? showRaw.split(",").map((item) => item === "recent_hits" ? "hits" : item).filter((item) => ["dps", "damage", "incoming", "encounter", "hits", "focus"].includes(item)) : hitMode ? ["hits", "focus"] : ["dps", "damage", "encounter", "hits", "focus"];
+    const parsedShow = hasShow ? showRaw.split(",").map((item) => item === "recent_hits" ? "hits" : item).filter((item) => ["dps", "damage", "incoming", "encounter", "phase", "boss", "hits", "focus", "loadout"].includes(item)) : hitMode ? ["hits", "focus", "phase", "boss"] : ["dps", "damage", "encounter", "phase", "boss", "hits", "focus"];
+    if (hasShow && params.get("ui") !== String(OVERLAY_SETTINGS_VERSION) && parsedShow.includes("encounter")) {
+      if (!parsedShow.includes("phase")) parsedShow.push("phase");
+      if (!parsedShow.includes("boss")) parsedShow.push("boss");
+    }
     const requestedLayout = params.get("layout") || (hitMode ? "hits" : "leaderboard");
     return {
+      surface: params.get("surface") === "desktop" ? "desktop" : "browser",
       profile: ["broadcast", "minimal", "vr"].includes(params.get("profile")) ? params.get("profile") : "broadcast",
       layout: ["leaderboard", "compact", "ticker", "hits"].includes(requestedLayout) ? requestedLayout : "leaderboard",
       theme: ["void", "glass"].includes(params.get("theme")) ? params.get("theme") : "void",
@@ -1206,24 +1275,34 @@
           ? { tone: "ready", eyebrow: "MINMAXXER READY", title: "NO LIVE ECLIPTICA INSTANCE", detail: "Join Ecliptica in VRChat. This overlay will update automatically.", badge: "WAITING FOR VRCHAT" }
           : null;
     if (status) {
-      root.innerHTML = `<section class="combat-overlay overlay-status-card status-${status.tone} profile-${options.profile} layout-${options.layout} theme-${options.theme}" style="--overlay-accent:${accent[0]};--overlay-accent-rgb:${accent[1]};--overlay-opacity:${options.bg/100};--overlay-scale:${options.scale/100}" aria-label="MINMAXXER overlay status"><header class="overlay-head"><div class="overlay-brand"><span class="overlay-logo">MX</span><div class="overlay-title"><strong>MINMAXXER</strong><span>LOCAL OBS HUD</span></div></div><div class="overlay-status-badge"><i></i>${escapeHtml(status.badge)}</div></header><div class="overlay-status-body"><span>${escapeHtml(status.eyebrow)}</span><strong>${escapeHtml(status.title)}</strong><p>${escapeHtml(status.detail)}</p></div><footer class="overlay-foot"><span class="live-dot"><i></i>${escapeHtml(status.badge)}</span><span>127.0.0.1 // PRIVATE</span></footer></section>`;
+      root.innerHTML = `<section class="combat-overlay surface-${options.surface} overlay-status-card status-${status.tone} profile-${options.profile} layout-${options.layout} theme-${options.theme}" style="--overlay-accent:${accent[0]};--overlay-accent-rgb:${accent[1]};--overlay-opacity:${options.bg/100};--overlay-scale:${options.scale/100}" aria-label="MINMAXXER overlay status"><header class="overlay-head"><div class="overlay-brand"><span class="overlay-logo">MX</span><div class="overlay-title"><strong>MINMAXXER</strong><span>LOCAL OBS HUD</span></div></div><div class="overlay-status-badge"><i></i>${escapeHtml(status.badge)}</div></header><div class="overlay-status-body"><span>${escapeHtml(status.eyebrow)}</span><strong>${escapeHtml(status.title)}</strong><p>${escapeHtml(status.detail)}</p></div><footer class="overlay-foot"><span class="live-dot"><i></i>${escapeHtml(status.badge)}</span><span>127.0.0.1 // PRIVATE</span></footer></section>`;
       return;
     }
     const displayDuration = live.encounter.duration + (live.encounter.active && !state.usingMock && state.lastLiveAt ? Math.max(0, (Date.now() - state.lastLiveAt) / 1000) : 0);
     const metrics = ["dps", "damage", "incoming"].filter((metric) => options.show.includes(metric));
-    if (!metrics.length) metrics.push("dps");
-    const players = [...live.players].sort((a, b) => metricValue(b, metrics[0], live.encounter.duration) - metricValue(a, metrics[0], live.encounter.duration)).slice(0, options.rows);
-    const max = Math.max(...players.map((p) => metricValue(p, metrics[0], live.encounter.duration)), 1);
+    const primaryMetric = metrics[0] || null;
+    const players = primaryMetric ? [...live.players].sort((a, b) => metricValue(b, primaryMetric, live.encounter.duration) - metricValue(a, primaryMetric, live.encounter.duration)).slice(0, options.rows) : [];
+    const max = primaryMetric ? Math.max(...players.map((p) => metricValue(p, primaryMetric, live.encounter.duration)), 1) : 1;
     const scope = liveCombatScope(live);
     const metricLabel = { dps: `${scope.metric} DPS`, damage: `${scope.metric} DAMAGE`, incoming: `${scope.metric} INCOMING` };
     const metricFormat = (_, value) => formatCompact(value);
     const totals = metrics.slice(0, options.layout === "ticker" ? 1 : 3);
     const hits = recentHits(live, options.hitRows || 4);
     const newestHitKey = hits[0] ? `${hits[0].id}|${hits[0].amount}|${hits[0].time}` : ""; const hitChanged = Boolean(newestHitKey && overlayHitMemory.get(root) !== newestHitKey); overlayHitMemory.set(root, newestHitKey);
+    const phaseState = runPhasePresentation(live);
+    const bossState = bossNumberPresentation(live);
+    const runChips = [];
+    if (options.show.includes("phase")) runChips.push(`<span class="overlay-context-chip phase"><small>RUN PHASE</small><strong>${escapeHtml(phaseState.name)}</strong><em>${escapeHtml(phaseState.finalEye ? "EYE OF THE ECLIPSE" : phaseState.percent)}</em></span>`);
+    if (options.show.includes("boss")) runChips.push(`<span class="overlay-context-chip boss${bossState.inferred ? " inferred" : ""}" title="${bossState.inferred ? "Estimated from Ecliptica's logged run progress after a mid-run observation." : bossState.known ? "Counted from Ecliptica stage markers in this run." : "Boss number has not been observed yet."}"><small>CURRENT BOSS</small><strong>${escapeHtml(bossState.short)}</strong><em>${escapeHtml(Number.isFinite(live.runContext?.bossSubphase) && live.runContext.bossSubphase > 1 ? `FORM ${Math.round(live.runContext.bossSubphase)}` : bossState.inferred ? "INFERRED" : bossState.known ? "RUN ORDER" : "AWAITING STAGE")}</em></span>`);
+    const runContextWidget = runChips.length ? `<div class="overlay-run-context">${runChips.join("")}</div>` : "";
     const focusState = focusPresentation(live);
     const focus = options.show.includes("focus") ? `<div class="overlay-focus confidence-${escapeHtml(focusState.confidence)} ${live.focus && scope.key === "boss" ? "" : "idle"}" title="${escapeHtml(focusState.note)}"><span>BOSS TARGET?</span><strong>${escapeHtml(focusState.player)}</strong><em>${escapeHtml(focusState.detail)}</em><i>${escapeHtml(focusState.badge)}</i></div>` : "";
+    const loadoutItems = live.loadout?.items || [];
+    const loadout = options.show.includes("loadout") ? `<section class="overlay-loadout${live.loadout?.available ? "" : " unavailable"}" title="${escapeHtml(live.loadout?.sourceNote || "Loadout telemetry is unavailable.")}"><header><span>LOCAL LOADOUT</span><small>${live.loadout?.available ? `${loadoutItems.length} OBSERVED` : "NOT EXPOSED BY LOG"}</small></header>${live.loadout?.available ? `<div>${loadoutItems.length ? loadoutItems.slice(0,8).map((item)=>`<span><b>${escapeHtml(item.name)}</b><i>×${formatNumber(item.stacks)}</i></span>`).join("") : `<em>Observed empty loadout</em>`}</div>` : `<div><em>Ecliptica did not log shop item names or stacks.</em></div>`}</section>` : "";
     const hitWidget = (options.show.includes("hits") || options.layout === "hits") ? `<section class="overlay-hit-widget" aria-label="Previous local outgoing hits"><header><span>PREVIOUS HITS</span><small>LOCAL OUTGOING · LIVE</small></header>${hits.length ? hits.map((hit,index)=>`<div class="overlay-hit-row ${index===0&&hitChanged?"newest":""}"><span class="hit-age">${hit.age<10?hit.age.toFixed(1):Math.round(hit.age)}s</span><span class="hit-action">${escapeHtml(hit.action)}</span><span class="hit-type ${hit.strike?"strike":"non-strike"}">${hit.strike?"STRIKE":"NON-STRIKE"}</span><strong>${formatNumber(hit.amount)}${hit.flags.includes("CRIT")?" ✦":""}</strong></div>`).join("") : `<div class="overlay-hit-empty">Waiting for outgoing damage…</div>`}</section>` : "";
-    root.innerHTML = `<section class="combat-overlay profile-${options.profile} layout-${options.layout} theme-${options.theme}" style="--overlay-accent:${accent[0]};--overlay-accent-rgb:${accent[1]};--overlay-opacity:${options.bg/100};--overlay-scale:${options.scale/100};--metric-count:${metrics.length};--total-cols:${Math.max(1,totals.length)}" aria-label="Live Ecliptica combat overlay"><header class="overlay-head"><div class="overlay-brand"><span class="overlay-logo">MX</span><div class="overlay-title"><strong>${escapeHtml(options.show.includes("encounter") ? live.encounter.name : options.layout === "hits" ? "PREVIOUS HITS" : "MINMAXXER")}</strong><span>${escapeHtml(options.show.includes("encounter") ? `${live.encounter.phase || live.stage} · ${live.world}` : "ECLIPTICA COMBAT")}</span></div></div><div class="overlay-timer"><strong>${formatDuration(displayDuration,true)}</strong><span>${live.encounter.active ? `● ${scope.label}` : live.connected ? scope.label : "WAITING"}</span></div></header>${focus}<div class="overlay-totals">${totals.map((metric,i)=>`<div class="overlay-total ${i===0?"accent":""}"><span>LOCAL ${metricLabel[metric]}${scope.excluded ? " · EXCLUDED" : ""}</span><strong>${metricFormat(metric,metric==="dps"?live.outgoing.dps:metric==="damage"?live.outgoing.total:live.incoming.dps)}</strong></div>`).join("")}</div><div class="overlay-roster"><div class="overlay-columns"><span>#</span><span>PLAYER</span>${metrics.map((metric)=>`<span>${metricLabel[metric]}</span>`).join("")}</div>${players.map((player,index)=>{const roleKey=player.role.toLowerCase();const rgb=hexToRgb(player.color);return `<div class="overlay-player" style="--share:${metricValue(player,metrics[0],live.encounter.duration)/max*100};--player-rgb:${rgb}"><span class="overlay-rank">${String(index+1).padStart(2,"0")}</span><span class="overlay-player-name"><strong>${escapeHtml(player.name)}${player.you?" · YOU":""}</strong><small style="color:${ROLE_COLORS[roleKey]||ROLE_COLORS.unknown}">${escapeHtml(player.className||player.role)}</small></span>${metrics.map((metric,metricIndex)=>`<span class="overlay-player-value ${metricIndex===0?"primary":""}"><strong>${metricFormat(metric,metricValue(player,metric,live.encounter.duration))}</strong><small>${metric === "dps" ? formatPercent(player.dps/Math.max(live.outgoing.dps,1)*100) : metricLabel[metric]}</small></span>`).join("")}</div>`}).join("")}</div>${hitWidget}<footer class="overlay-foot"><span class="live-dot"><i></i>${state.usingMock?"DEMO DATA":live.connected?"LOG CONNECTED":"WAITING FOR LOG"}</span><span>${escapeHtml(scope.label)} // ${escapeHtml(live.stage)}</span></footer></section>`;
+    const totalsWidget = totals.length ? `<div class="overlay-totals">${totals.map((metric,i)=>`<div class="overlay-total ${i===0?"accent":""}"><span>LOCAL ${metricLabel[metric]}${scope.excluded ? " · EXCLUDED" : ""}</span><strong>${metricFormat(metric,metric==="dps"?live.outgoing.dps:metric==="damage"?live.outgoing.total:live.incoming.dps)}</strong></div>`).join("")}</div>` : "";
+    const rosterWidget = primaryMetric ? `<div class="overlay-roster"><div class="overlay-columns"><span>#</span><span>PLAYER</span>${metrics.map((metric)=>`<span>${metricLabel[metric]}</span>`).join("")}</div>${players.map((player,index)=>{const roleKey=player.role.toLowerCase();const rgb=hexToRgb(player.color);return `<div class="overlay-player" style="--share:${metricValue(player,primaryMetric,live.encounter.duration)/max*100};--player-rgb:${rgb}"><span class="overlay-rank">${String(index+1).padStart(2,"0")}</span><span class="overlay-player-name"><strong>${escapeHtml(player.name)}${player.you?" · YOU":""}</strong><small style="color:${ROLE_COLORS[roleKey]||ROLE_COLORS.unknown}">${escapeHtml(player.className||player.role)}</small></span>${metrics.map((metric,metricIndex)=>`<span class="overlay-player-value ${metricIndex===0?"primary":""}"><strong>${metricFormat(metric,metricValue(player,metric,live.encounter.duration))}</strong><small>${metric === "dps" ? formatPercent(player.dps/Math.max(live.outgoing.dps,1)*100) : metricLabel[metric]}</small></span>`).join("")}</div>`}).join("")}</div>` : "";
+    root.innerHTML = `<section class="combat-overlay surface-${options.surface} profile-${options.profile} layout-${options.layout} theme-${options.theme}" style="--overlay-accent:${accent[0]};--overlay-accent-rgb:${accent[1]};--overlay-opacity:${options.bg/100};--overlay-scale:${options.scale/100};--metric-count:${metrics.length};--total-cols:${Math.max(1,totals.length)}" aria-label="Live Ecliptica combat overlay"><header class="overlay-head"><div class="overlay-brand"><span class="overlay-logo">MX</span><div class="overlay-title"><strong>${escapeHtml(options.show.includes("encounter") ? live.encounter.name : options.layout === "hits" ? "PREVIOUS HITS" : "MINMAXXER")}</strong><span>${escapeHtml(options.show.includes("encounter") ? `${live.stage} · ${live.world}` : "ECLIPTICA COMBAT")}</span></div></div><div class="overlay-timer"><strong>${formatDuration(displayDuration,true)}</strong><span>${live.encounter.active ? `● ${scope.label}` : live.connected ? scope.label : "WAITING"}</span></div></header>${runContextWidget}${focus}${totalsWidget}${loadout}${rosterWidget}${hitWidget}<footer class="overlay-foot"><span class="live-dot"><i></i>${state.usingMock?"DEMO DATA":live.connected?"LOG CONNECTED":"WAITING FOR LOG"}</span><span>${escapeHtml(scope.label)} // ${escapeHtml(live.stage)}</span></footer></section>`;
   }
 
   function hexToRgb(hex) { const value = String(hex).replace("#", ""); const parsed = parseInt(value.length === 3 ? value.split("").map((c) => c + c).join("") : value, 16); return `${(parsed >> 16) & 255},${(parsed >> 8) & 255},${parsed & 255}`; }
@@ -1232,18 +1311,14 @@
     return {
       profile: $(".profile-card.active")?.dataset.profile || "broadcast", layout: $("#overlayLayout")?.value || "leaderboard", theme: $("#overlayTheme")?.value || "void",
       accent: $("#accentOptions button.active")?.dataset.accent || "cyan", rows: number($("#overlayRows")?.value, 5), hitRows: number($("#overlayHitRows")?.value, 4), scale: number($("#overlayScale")?.value, 100), bg: number($("#overlayBg")?.value, 78),
-      show: $$(".show-options input:checked").map((input) => input.value)
+      show: $$(".show-options input:checked:not(:disabled)").map((input) => input.value)
     };
   }
 
   function overlayUrl(options) {
     const params = new URLSearchParams();
-    params.set("profile", options.profile); params.set("layout", options.layout); params.set("theme", options.theme); params.set("accent", options.accent); params.set("rows", options.rows); params.set("hit_rows", options.hitRows); params.set("show", options.show.join(",")); params.set("bg", options.bg); params.set("scale", options.scale);
+    params.set("ui", OVERLAY_SETTINGS_VERSION); params.set("profile", options.profile); params.set("layout", options.layout); params.set("theme", options.theme); params.set("accent", options.accent); params.set("rows", options.rows); params.set("hit_rows", options.hitRows); params.set("show", options.show.join(",")); params.set("bg", options.bg); params.set("scale", options.scale);
     return `${DEFAULT_ORIGIN}/overlay?${params}`;
-  }
-
-  function outputsEnabled() {
-    return Boolean(state.settings.desktop_overlay_enabled ?? state.settings.desktopOverlayEnabled ?? state.settings.desktop_overlay?.enabled) || Boolean(state.settings.vr_overlay_enabled ?? state.settings.vrOverlayEnabled ?? state.settings.vr_overlay?.enabled);
   }
 
   function renderVrStatus() {
@@ -1264,39 +1339,105 @@
   }
 
   function queueOverlayProfileSave(options) {
-    if (!outputsEnabled()) return;
+    state.profileSavePendingOptions = { ...options };
     clearTimeout(state.profileSaveTimer);
-    state.profileSaveTimer = setTimeout(async () => {
-      const overlayPatch = { ...options, hit_rows: options.hitRows, recent_hit_rows: options.hitRows };
-      try { await api("/api/settings", { method: "PUT", body: JSON.stringify({ overlay: overlayPatch }) }); }
-      catch (_) { /* Keep the local preview responsive; output status already reports connectivity. */ }
-    }, 450);
+    state.profileSaveTimer = setTimeout(flushOverlayProfileSave, 450);
+  }
+
+  async function flushOverlayProfileSave() {
+    if (state.profileSaveInFlight || !state.profileSavePendingOptions) return;
+    const options = state.profileSavePendingOptions;
+    state.profileSavePendingOptions = null;
+    state.profileSaveInFlight = true;
+    let failed = false;
+    const overlayPatch = { ...options, schema_version: OVERLAY_SETTINGS_VERSION, hit_rows: options.hitRows, recent_hit_rows: options.hitRows };
+    try {
+      await api("/api/settings", { method: "PUT", body: JSON.stringify({ overlay: overlayPatch }) });
+      // A newer edit may have arrived while this request was in flight. Its local pending copy
+      // must remain canonical until the serialized follow-up request succeeds.
+      if (!state.profileSavePendingOptions) {
+        state.studioBackendPending = false;
+        storeStudioOptions(options);
+      }
+    } catch (_) {
+      failed = true;
+      // Preserve the newest payload (or this one when no newer edit exists) for launch-time retry.
+      if (!state.profileSavePendingOptions) state.profileSavePendingOptions = options;
+    } finally {
+      state.profileSaveInFlight = false;
+      if (!failed && state.profileSavePendingOptions) {
+        clearTimeout(state.profileSaveTimer);
+        state.profileSaveTimer = setTimeout(flushOverlayProfileSave, 0);
+      }
+    }
+  }
+
+  function storeStudioOptions(options) {
+    try { localStorage.setItem("minmaxxer.overlay", JSON.stringify({ ...options, schemaVersion: OVERLAY_SETTINGS_VERSION, backendPending: state.studioBackendPending })); }
+    catch (_) { /* Storage is optional. */ }
   }
 
   function renderStudioPreview(persist = false) {
     if (!$("#studioOverlayPreview") || !state.live) return; const options = readStudioOptions(); state.overlay = options;
+    if (persist) state.studioBackendPending = true;
     text("#overlayRowsValue", options.rows); text("#overlayHitRowsValue", options.hitRows); text("#overlayScaleValue", `${options.scale}%`); text("#overlayBgValue", `${options.bg}%`);
     $("#obsUrl").value = overlayUrl(options); renderCombatOverlay($("#studioOverlayPreview"), state.live, { ...options, scale: 100, statusCards: false });
-    try { localStorage.setItem("minmaxxer.overlay", JSON.stringify(options)); } catch (_) { /* Storage is optional. */ }
+    storeStudioOptions(options);
     renderVrStatus();
     if (persist) queueOverlayProfileSave(options);
   }
 
+  function studioOptionsFromSettings() {
+    const desktop = state.settings?.desktop_overlay ?? state.settings?.desktopOverlay ?? {};
+    const profiles = state.settings?.overlay_profiles ?? state.settings?.overlayProfiles;
+    if (!Array.isArray(profiles) || !profiles.length) return null;
+    const requested = String(desktop.profile || "broadcast");
+    const profile = profiles.find((item) => String(item.id) === requested) || profiles[0];
+    const show = [];
+    if (profile.show_dps) show.push("dps");
+    if (profile.show_damage) show.push("damage");
+    if (profile.show_incoming) show.push("incoming");
+    if (profile.show_encounter) show.push("encounter");
+    if (profile.show_phase) show.push("phase");
+    if (profile.show_boss_number) show.push("boss");
+    if (profile.show_hits || profile.show_recent_hits) show.push("hits");
+    if (profile.show_focus) show.push("focus");
+    return {
+      profile: String(profile.id || requested), layout: String(profile.layout || "leaderboard"), theme: String(profile.theme || "void"), accent: profile.accent === "#8ff0cf" ? "mint" : String(profile.accent || "cyan"),
+      rows: number(profile.rows, 5), hitRows: number(profile.recent_hit_rows ?? profile.recentHitRows, 4), scale: number(profile.scale, 1) * 100,
+      bg: number(desktop.opacity, .78) * 100, show, schemaVersion: OVERLAY_SETTINGS_VERSION
+    };
+  }
+
   function applySavedStudioOptions() {
-    let saved = null; try { saved = JSON.parse(localStorage.getItem("minmaxxer.overlay")); } catch (_) { saved = null; }
+    let local = null; try { local = JSON.parse(localStorage.getItem("minmaxxer.overlay")); } catch (_) { local = null; }
+    const localVersion = number(local?.schemaVersion ?? local?.schema_version, 1);
+    const migrateLocal = Boolean(local) && localVersion < OVERLAY_SETTINGS_VERSION;
+    const retryLocal = Boolean(local?.backendPending);
+    let saved = migrateLocal || retryLocal ? local : studioOptionsFromSettings() || local;
     if (!saved) return;
     $$(".profile-card").forEach((button) => button.classList.toggle("active", button.dataset.profile === saved.profile));
     if (saved.layout) $("#overlayLayout").value = saved.layout;
     if (saved.theme) $("#overlayTheme").value = ["void", "glass"].includes(saved.theme) ? saved.theme : "void";
     if (saved.rows) $("#overlayRows").value = saved.rows; if (saved.hitRows) $("#overlayHitRows").value = saved.hitRows; if (saved.scale) $("#overlayScale").value = saved.scale; if (saved.bg !== undefined) $("#overlayBg").value = saved.bg;
     $$("#accentOptions button").forEach((button) => button.classList.toggle("active", button.dataset.accent === saved.accent));
-    if (Array.isArray(saved.show)) $$(".show-options input").forEach((input) => { input.checked = saved.show.includes(input.value); });
+    if (Array.isArray(saved.show)) {
+      const restoredShow = new Set(saved.show);
+      if (number(saved.schemaVersion, 1) < OVERLAY_SETTINGS_VERSION && restoredShow.has("encounter")) { restoredShow.add("phase"); restoredShow.add("boss"); }
+      $$(".show-options input").forEach((input) => { input.checked = !input.disabled && restoredShow.has(input.value); });
+    }
+    if (migrateLocal || retryLocal) {
+      state.studioBackendPending = true;
+      const migrated = readStudioOptions();
+      storeStudioOptions(migrated);
+      queueOverlayProfileSave(migrated);
+    }
   }
 
   async function setOutputEnabled(kind, enabled, button) {
     button.setAttribute("aria-checked", String(enabled)); button.classList.toggle("active", enabled);
     const nestedKey = `${kind}_overlay`; state.settings[`${kind}_overlay_enabled`] = enabled; state.settings[nestedKey] = { ...(state.settings[nestedKey] || {}), enabled };
-    const studio = readStudioOptions(); const overlayPatch = { ...studio, hit_rows: studio.hitRows, recent_hit_rows: studio.hitRows };
+    const studio = readStudioOptions(); const overlayPatch = { ...studio, schema_version: OVERLAY_SETTINGS_VERSION, hit_rows: studio.hitRows, recent_hit_rows: studio.hitRows };
     try { await api("/api/settings", { method: "PUT", body: JSON.stringify({ [`${kind}_overlay_enabled`]: enabled, [nestedKey]: { enabled }, overlay: overlayPatch }) }); showToast(`${kind === "vr" ? "VR" : "Desktop"} overlay ${enabled ? "enabled" : "disabled"}.`); if (kind === "vr") setTimeout(refreshVrStatus, 500); }
     catch (_) { state.settings[`${kind}_overlay_enabled`] = !enabled; state.settings[nestedKey] = { ...(state.settings[nestedKey] || {}), enabled: !enabled }; setSwitch(button, !enabled); showToast(`The ${kind} overlay setting was not changed because the service is offline.`, true); }
   }
@@ -1441,7 +1582,7 @@
   async function bootApp() {
     await loadInitialData(); applySavedStudioOptions(); hydrateVrControls(); bindMainEvents(); renderAll();
     const initialPage = new URLSearchParams(location.search).get("view") || "live"; setPage(initialPage, false);
-    connectStream(() => { if (document.hidden) return; renderLive(); if ($('[data-page="overlay"]').classList.contains("active")) renderStudioPreview(); }, { refreshArchive: true });
+    connectStream(() => { if (document.hidden) return; renderLive(); if ($('[data-page="overlay"]').classList.contains("active")) renderStudioPreview(); }, { refreshArchive: true, clearLiveOnError: true });
     startDemoClock(() => { if (document.hidden) return; renderLive(); if ($('[data-page="overlay"]').classList.contains("active")) renderStudioPreview(); });
     const desktop = Boolean(state.settings.desktop_overlay_enabled ?? state.settings.desktopOverlayEnabled ?? state.settings.desktop_overlay?.enabled); const vr = Boolean(state.settings.vr_overlay_enabled ?? state.settings.vrOverlayEnabled ?? state.settings.vr_overlay?.enabled); setSwitch($("#desktopOverlayToggle"), desktop); setSwitch($("#vrOverlayToggle"), vr);
     setSwitch($("#desktopHeadsetToggle"), Boolean(state.settings.desktop_overlay?.show_when_vr_active));

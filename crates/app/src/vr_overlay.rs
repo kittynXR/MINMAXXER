@@ -56,6 +56,8 @@ pub struct VrOverlaySettings {
     pub controller_grab_enabled: bool,
     pub show_status: bool,
     pub show_encounter: bool,
+    pub show_phase: bool,
+    pub show_boss_number: bool,
     pub show_focus: bool,
     pub show_rolling_dps: bool,
     pub show_total_damage: bool,
@@ -64,6 +66,7 @@ pub struct VrOverlaySettings {
     pub show_attacks: bool,
     pub show_recent_hits: bool,
     pub recent_hit_rows: u8,
+    pub show_loadout: bool,
 }
 
 impl Default for VrOverlaySettings {
@@ -80,6 +83,8 @@ impl Default for VrOverlaySettings {
             controller_grab_enabled: false,
             show_status: true,
             show_encounter: true,
+            show_phase: true,
+            show_boss_number: true,
             show_focus: true,
             show_rolling_dps: true,
             show_total_damage: true,
@@ -88,6 +93,7 @@ impl Default for VrOverlaySettings {
             show_attacks: true,
             show_recent_hits: true,
             recent_hit_rows: 5,
+            show_loadout: false,
         }
     }
 }
@@ -1171,12 +1177,57 @@ fn render_frame(
     let indicator = if snapshot.connected { GREEN } else { ORANGE };
     fill_circle(pixels, 954, 48, 7, indicator);
 
+    // Put the requested run-position fields first so a long encounter name can never clip them.
     let mut context = Vec::with_capacity(3);
-    if settings.show_encounter && !snapshot.encounter.name.is_empty() {
-        context.push(snapshot.encounter.name.as_str());
+    if settings.show_phase {
+        if let Some(phase_name) = snapshot.run_context.phase_name.as_ref() {
+            let final_eye = snapshot
+                .run_context
+                .progress
+                .is_some_and(|progress| progress >= 0.999)
+                && [
+                    snapshot.stage.as_deref(),
+                    Some(snapshot.encounter.name.as_str()),
+                ]
+                .into_iter()
+                .flatten()
+                .any(|name| name.to_ascii_lowercase().contains("bringer"));
+            let phase = if final_eye {
+                "ECLIPSE (EYE)".to_owned()
+            } else {
+                snapshot
+                    .run_context
+                    .progress
+                    .map(|progress| format!("{phase_name} {:.0}%", progress * 100.0))
+                    .unwrap_or_else(|| phase_name.clone())
+            };
+            context.push(phase);
+        }
     }
-    if settings.show_status && !snapshot.status.is_empty() {
-        context.push(snapshot.status.as_str());
+    if settings.show_boss_number {
+        if let Some(boss_number) = snapshot.run_context.boss_number {
+            let inferred = if snapshot.run_context.boss_number_inferred {
+                "~"
+            } else {
+                ""
+            };
+            let subphase = snapshot
+                .run_context
+                .boss_subphase
+                .filter(|subphase| *subphase > 1)
+                .map(|subphase| format!(" FORM {subphase}"))
+                .unwrap_or_default();
+            context.push(format!("BOSS {inferred}#{boss_number:02}{subphase}"));
+        }
+    }
+    if settings.show_encounter && !snapshot.encounter.name.is_empty() {
+        context.push(snapshot.encounter.name.clone());
+    }
+    if settings.show_status
+        && !snapshot.status.is_empty()
+        && (!snapshot.connected || !snapshot.in_world || !snapshot.encounter.active)
+    {
+        context.push(snapshot.status.clone());
     }
     let placement_banner = match placement_state {
         VrPlacementState::Arming => Some(("HOLD BOTH GRIPS...", ORANGE)),
@@ -1223,7 +1274,7 @@ fn render_frame(
         draw_text_right(font, glyphs, pixels, &message, 968, 101, 17, ORANGE, 322);
     }
 
-    let mut metrics: Vec<(&str, String, Color)> = Vec::with_capacity(3);
+    let mut metrics: Vec<(&str, String, Color)> = Vec::with_capacity(4);
     if settings.show_rolling_dps {
         metrics.push((
             "5 SECOND DPS",
@@ -1240,6 +1291,16 @@ fn render_frame(
     }
     if settings.show_incoming {
         metrics.push(("DAMAGE TAKEN", compact_number(snapshot.incoming.total), RED));
+    }
+    if settings.show_loadout {
+        let summary = if !snapshot.loadout.available {
+            "NOT LOGGED".to_owned()
+        } else if snapshot.loadout.items.is_empty() {
+            "EMPTY".to_owned()
+        } else {
+            format!("{} ITEMS", snapshot.loadout.items.len())
+        };
+        metrics.push(("LOCAL LOADOUT", summary, VIOLET));
     }
 
     let list_top = if metrics.is_empty() {
@@ -1368,16 +1429,31 @@ fn draw_stats_column(
     fill_rounded_rect(pixels, x, y, width, height, 14, PANEL_ALT);
     let mut cursor_y = y + 25;
     let mut budget = settings.rows as usize;
-    let row_height = 36;
+    // Player summaries can contain DPS, total damage, and incoming DPS at once. Two text lines
+    // keep all selected values readable in the split-column HUD instead of clipping the final
+    // metric off the right edge.
+    let row_height = 44;
 
     let mut players: Vec<_> = snapshot.players.iter().collect();
-    players.sort_by(|left, right| right.damage.total.total_cmp(&left.damage.total));
+    players.sort_by(|left, right| {
+        player_primary_metric(right, settings).total_cmp(&player_primary_metric(left, settings))
+    });
     if settings.show_players && !players.is_empty() && budget > 0 {
+        let heading = match (
+            settings.show_rolling_dps,
+            settings.show_total_damage,
+            settings.show_incoming,
+        ) {
+            (true, false, false) => "PLAYERS · DPS",
+            (false, true, false) => "PLAYERS · DAMAGE",
+            (false, false, true) => "PLAYERS · INCOMING",
+            _ => "PLAYERS",
+        };
         draw_text(
             font,
             glyphs,
             pixels,
-            "PLAYERS",
+            heading,
             x + 15,
             cursor_y,
             15,
@@ -1386,11 +1462,18 @@ fn draw_stats_column(
         );
         cursor_y += 16;
         let player_count = players.len().min(budget);
-        let max_damage = players
+        let max_value = players
             .iter()
             .take(player_count)
-            .map(|player| player.damage.total)
+            .map(|player| player_primary_metric(player, settings))
             .fold(0.0_f64, f64::max);
+        let accent = if settings.show_rolling_dps {
+            CYAN
+        } else if settings.show_total_damage {
+            VIOLET
+        } else {
+            RED
+        };
         for player in players.into_iter().take(player_count) {
             if cursor_y + row_height > y + height {
                 break;
@@ -1403,13 +1486,9 @@ fn draw_stats_column(
                 cursor_y,
                 width - 30,
                 &player.player,
-                &format!(
-                    "{} /s  |  {}",
-                    compact_number(player.damage.dps),
-                    compact_number(player.damage.total)
-                ),
-                ratio(player.damage.total, max_damage),
-                CYAN,
+                &player_metric_summary(player, settings),
+                ratio(player_primary_metric(player, settings), max_value),
+                accent,
             );
             cursor_y += row_height;
         }
@@ -1477,6 +1556,45 @@ fn draw_stats_column(
     }
 }
 
+fn player_primary_metric(
+    player: &minmaxxer_core::PlayerStats,
+    settings: &VrOverlaySettings,
+) -> f64 {
+    if settings.show_rolling_dps {
+        player.damage.dps
+    } else if settings.show_total_damage {
+        player.damage.total
+    } else if settings.show_incoming {
+        player.incoming.damage_per_second
+    } else {
+        0.0
+    }
+}
+
+fn player_metric_summary(
+    player: &minmaxxer_core::PlayerStats,
+    settings: &VrOverlaySettings,
+) -> String {
+    let mut values = Vec::with_capacity(3);
+    if settings.show_rolling_dps {
+        values.push(format!("{} DPS", compact_number(player.damage.dps)));
+    }
+    if settings.show_total_damage {
+        values.push(format!("{} DMG", compact_number(player.damage.total)));
+    }
+    if settings.show_incoming {
+        values.push(format!(
+            "{} IN/s",
+            compact_number(player.incoming.damage_per_second)
+        ));
+    }
+    if values.is_empty() {
+        "—".to_owned()
+    } else {
+        values.join(" | ")
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn draw_stat_row(
     font: &Font,
@@ -1490,31 +1608,21 @@ fn draw_stat_row(
     fraction: f64,
     accent: Color,
 ) {
-    draw_text(
-        font,
-        glyphs,
-        pixels,
-        label,
-        x,
-        y + 19,
-        18,
-        WHITE,
-        width * 55 / 100,
-    );
+    draw_text(font, glyphs, pixels, label, x, y + 16, 17, WHITE, width);
     draw_text_right(
         font,
         glyphs,
         pixels,
         value,
         x + width,
-        y + 19,
-        16,
+        y + 34,
+        14,
         MUTED,
-        width * 45 / 100,
+        width,
     );
-    fill_rounded_rect(pixels, x, y + 27, width, 3, 1, Color(48, 62, 84, 180));
+    fill_rounded_rect(pixels, x, y + 39, width, 3, 1, Color(48, 62, 84, 180));
     let bar_width = ((width as f64 * fraction.clamp(0.0, 1.0)).round() as i32).max(2);
-    fill_rounded_rect(pixels, x, y + 27, bar_width, 3, 1, accent);
+    fill_rounded_rect(pixels, x, y + 39, bar_width, 3, 1, accent);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1858,7 +1966,16 @@ fn blend_pixel(pixels: &mut [u8], x: i32, y: i32, source: Color) {
 mod tests {
     use super::*;
     use chrono::NaiveDate;
-    use minmaxxer_core::{EventKind, GameEvent};
+    use minmaxxer_core::{DamageTotals, EventKind, GameEvent, IncomingTotals, PlayerStats};
+
+    #[test]
+    fn legacy_vr_settings_inherit_run_context_without_enabling_loadout() {
+        let settings: VrOverlaySettings = serde_json::from_value(serde_json::json!({})).unwrap();
+
+        assert!(settings.show_phase);
+        assert!(settings.show_boss_number);
+        assert!(!settings.show_loadout);
+    }
 
     #[test]
     fn settings_sanitize_openvr_ranges_and_non_finite_values() {
@@ -1883,6 +2000,63 @@ mod tests {
         assert_eq!(settings.curvature, 0.0);
         assert_eq!(settings.rows, 1);
         assert_eq!(settings.recent_hit_rows, 8);
+    }
+
+    #[test]
+    fn player_rows_respect_each_native_metric_toggle() {
+        let player = PlayerStats {
+            player: "Local".to_owned(),
+            damage: DamageTotals {
+                total: 12_000.0,
+                dps: 1_200.0,
+                ..DamageTotals::default()
+            },
+            incoming: IncomingTotals {
+                total: 900.0,
+                damage_per_second: 90.0,
+                ..IncomingTotals::default()
+            },
+            ..PlayerStats::default()
+        };
+        let mut settings = VrOverlaySettings {
+            show_rolling_dps: true,
+            show_total_damage: false,
+            show_incoming: false,
+            ..VrOverlaySettings::default()
+        };
+
+        let dps = player_metric_summary(&player, &settings);
+        assert!(dps.contains("DPS"));
+        assert!(!dps.contains("DMG"));
+        assert!(!dps.contains("IN/s"));
+        assert_eq!(player_primary_metric(&player, &settings), 1_200.0);
+
+        settings.show_rolling_dps = false;
+        settings.show_total_damage = true;
+        let damage = player_metric_summary(&player, &settings);
+        assert!(!damage.contains("DPS"));
+        assert!(damage.contains("DMG"));
+        assert!(!damage.contains("IN/s"));
+        assert_eq!(player_primary_metric(&player, &settings), 12_000.0);
+
+        settings.show_total_damage = false;
+        settings.show_incoming = true;
+        let incoming = player_metric_summary(&player, &settings);
+        assert!(!incoming.contains("DPS"));
+        assert!(!incoming.contains("DMG"));
+        assert!(incoming.contains("IN/s"));
+        assert_eq!(player_primary_metric(&player, &settings), 90.0);
+
+        settings.show_rolling_dps = true;
+        settings.show_total_damage = true;
+        let combined = player_metric_summary(&player, &settings);
+        assert!(combined.contains("DPS"));
+        assert!(combined.contains("DMG"));
+        assert!(combined.contains("IN/s"));
+        assert!(
+            combined.len() < 40,
+            "default VR summary should stay compact"
+        );
     }
 
     #[test]
@@ -2150,6 +2324,50 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     #[test]
+    fn run_phase_boss_and_loadout_controls_change_the_native_hud() {
+        let snapshot = EngineSnapshot {
+            run_context: minmaxxer_core::RunContext {
+                progress: Some(0.84),
+                phase_name: Some("ECLIPSE".to_owned()),
+                boss_number: Some(11),
+                boss_number_inferred: true,
+                boss_subphase: Some(2),
+            },
+            ..EngineSnapshot::default()
+        };
+        let mut settings = VrOverlaySettings {
+            show_status: false,
+            show_encounter: false,
+            show_phase: false,
+            show_boss_number: false,
+            show_focus: false,
+            show_rolling_dps: false,
+            show_total_damage: false,
+            show_incoming: false,
+            show_players: false,
+            show_attacks: false,
+            show_recent_hits: false,
+            show_loadout: false,
+            ..VrOverlaySettings::default()
+        };
+        let mut renderer = HudRenderer::new().expect("Windows includes Segoe UI");
+
+        let hidden = renderer.render(&snapshot, &settings).to_vec();
+        settings.show_phase = true;
+        let phase = renderer.render(&snapshot, &settings).to_vec();
+        assert!(changed_pixels_in_context_row(&hidden, &phase) > 0);
+
+        settings.show_boss_number = true;
+        let boss = renderer.render(&snapshot, &settings).to_vec();
+        assert!(changed_pixels_in_context_row(&phase, &boss) > 0);
+
+        settings.show_loadout = true;
+        let unavailable_loadout = renderer.render(&snapshot, &settings);
+        assert_ne!(boss, unavailable_loadout);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
     fn boss_target_placeholders_are_rendered_by_default() {
         let mut renderer = HudRenderer::new().expect("Windows includes Segoe UI");
         let mut settings = VrOverlaySettings {
@@ -2270,6 +2488,14 @@ mod tests {
     fn changed_pixels_in_focus_row(left: &[u8], right: &[u8]) -> usize {
         (75..110)
             .flat_map(|y| (620..980).map(move |x| (y * HUD_TEXTURE_WIDTH + x) * 4))
+            .filter(|index| left[*index..*index + 4] != right[*index..*index + 4])
+            .count()
+    }
+
+    #[cfg(target_os = "windows")]
+    fn changed_pixels_in_context_row(left: &[u8], right: &[u8]) -> usize {
+        (75..110)
+            .flat_map(|y| (40..610).map(move |x| (y * HUD_TEXTURE_WIDTH + x) * 4))
             .filter(|index| left[*index..*index + 4] != right[*index..*index + 4])
             .count()
     }

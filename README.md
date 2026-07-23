@@ -13,10 +13,13 @@ All application and HUD surfaces are dark-only. The Windows title bar, WebView p
 - Boss-window, encounter, rolling 5/15/30-second, stage, and run damage statistics. When boss telemetry exists, the primary historical DPS and totals cover boss fights only; pre-boss time and damage are reported separately.
 - Incoming damage totals, largest hit, and breakdown by the raw attack/source label present in the log.
 - Stage, class, boss/phase, session, roster, encounter timing, and raw event history.
+- Live run context with the PRIME/PENUMBRA/ANTUMBRA/UMBRA/ECLIPSE band and the current 1-based boss ordinal. Mid-run ordinal recovery is visibly marked as inferred.
 - Multi-player post-run reports after logs from the other players are imported. Matching Ecliptica session IDs are merged automatically.
 - An always-visible experimental `BOSS TARGET?` signal based on exact boss-entity VRChat network ownership, with confidence, evidence, and signal age. A matching incoming hit can corroborate the proxy, and the last candidate remains visible until the encounter boundary. Network ownership is **not** an authoritative hate table.
 
-Ecliptica's current logs do **not** expose other players' damage to one client, player/enemy HP, healing, shields, critical hits, blocks, misses, authoritative kills, or applied/removed buff and debuff state. MINMAXXER never invents those values. See [Log telemetry](docs/LOG_TELEMETRY.md) for the full capability matrix.
+Ecliptica directly logs a numeric run-progress value, but not the named difficulty band. MINMAXXER maps it with the documented, unofficial [EACT five-band convention](https://eact-doc.rtail.dev/?lang=en#phases): `0.0–<0.2` PRIME, `0.2–<0.4` PENUMBRA, `0.4–<0.6` ANTUMBRA, `0.6–<0.8` UMBRA, and `0.8–1.0` ECLIPSE. The half-open endpoint handling is MINMAXXER's convention, not an official world API contract. At progress `1.0`, a matching final Bringer-stage marker is presented as **EYE OF THE ECLIPSE**, corroborated by the community [boss reference](https://wikiwiki.jp/ecliptica/%E3%83%9C%E3%82%B9), while retaining the ECLIPSE numeric band. Boss ordinals counted from a run observed at progress zero are exact, as is boss 13 when the final Bringer marker identifies it; other mid-run recovery uses audited progress anchors and labels the estimate `INFERRED`/`~`.
+
+Ecliptica's current logs do **not** expose other players' damage to one client, player/enemy HP, healing, shields, critical hits, blocks, misses, authoritative kills, applied/removed buff and debuff state, or shop item identities and stack counts. Session load/save markers are checkpoints, not item-purchase records, so MINMAXXER does not construct a loadout from them. MINMAXXER never invents unavailable values. See [Log telemetry](docs/LOG_TELEMETRY.md) for the full capability matrix.
 
 ## Run it
 
@@ -80,6 +83,6 @@ cargo build --release -p minmaxxer
 ./scripts/build-portable.ps1
 ```
 
-The normal executable is written to `target\release\minmaxxer.exe`. The portable release script uses a clean isolated target, statically links the MSVC runtime, strips local build paths, and writes `dist\MINMAXXER-v0.2.1-windows-x64.exe`. Run the local server without the desktop WebView with `minmaxxer.exe --headless`.
+The normal executable is written to `target\release\minmaxxer.exe`. The portable release script uses a clean isolated target, statically links the MSVC runtime, strips local build paths, and writes `dist\MINMAXXER-v0.3.0-windows-x64.exe`. Run the local server without the desktop WebView with `minmaxxer.exe --headless`.
 
 The code is split into a dependency-light parser/analytics crate and a Windows app crate. More detail is in [Architecture](docs/ARCHITECTURE.md).

@@ -58,7 +58,10 @@ pub struct OverlayProfile {
     pub show_recent_hits: bool,
     pub recent_hit_rows: u8,
     pub show_encounter: bool,
+    pub show_phase: bool,
+    pub show_boss_number: bool,
     pub show_focus: bool,
+    pub show_loadout: bool,
     pub anonymize_players: bool,
 }
 
@@ -80,7 +83,10 @@ impl Default for OverlayProfile {
             show_recent_hits: true,
             recent_hit_rows: 5,
             show_encounter: true,
+            show_phase: true,
+            show_boss_number: true,
             show_focus: true,
+            show_loadout: false,
             anonymize_players: false,
         }
     }
@@ -127,7 +133,9 @@ impl AppConfig {
         }
         let bytes =
             fs::read(path).with_context(|| format!("failed reading config {}", path.display()))?;
-        let mut config: Self = serde_json::from_slice(&bytes)
+        let raw: serde_json::Value = serde_json::from_slice(&bytes)
+            .with_context(|| format!("failed parsing config {}", path.display()))?;
+        let mut config: Self = serde_json::from_value(raw.clone())
             .with_context(|| format!("failed parsing config {}", path.display()))?;
         let mut migrated = false;
         if config.stream_token.is_empty() {
@@ -138,7 +146,8 @@ impl AppConfig {
             config.overlay_profiles.push(OverlayProfile::default());
             migrated = true;
         }
-        migrated |= config.normalize_dark_overlay_themes();
+        migrated |= config.inherit_legacy_run_context_visibility(&raw);
+        migrated |= config.normalize_overlay_profiles();
         config.validate()?;
         if migrated {
             config.save(path)?;
@@ -146,11 +155,49 @@ impl AppConfig {
         Ok(config)
     }
 
-    fn normalize_dark_overlay_themes(&mut self) -> bool {
+    fn inherit_legacy_run_context_visibility(&mut self, raw: &serde_json::Value) -> bool {
+        let mut changed = false;
+        if let Some(raw_profiles) = raw
+            .get("overlay_profiles")
+            .and_then(|value| value.as_array())
+        {
+            for (profile, raw_profile) in self.overlay_profiles.iter_mut().zip(raw_profiles) {
+                let Some(raw_profile) = raw_profile.as_object() else {
+                    continue;
+                };
+                if !raw_profile.contains_key("show_phase") {
+                    profile.show_phase = profile.show_encounter;
+                    changed = true;
+                }
+                if !raw_profile.contains_key("show_boss_number") {
+                    profile.show_boss_number = profile.show_encounter;
+                    changed = true;
+                }
+            }
+        }
+
+        if let Some(raw_vr) = raw.get("vr_overlay").and_then(|value| value.as_object()) {
+            if !raw_vr.contains_key("show_phase") {
+                self.vr_overlay.show_phase = self.vr_overlay.show_encounter;
+                changed = true;
+            }
+            if !raw_vr.contains_key("show_boss_number") {
+                self.vr_overlay.show_boss_number = self.vr_overlay.show_encounter;
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    fn normalize_overlay_profiles(&mut self) -> bool {
         let mut changed = false;
         for profile in &mut self.overlay_profiles {
             if !matches!(profile.theme.as_str(), "void" | "glass") {
                 profile.theme = "void".to_owned();
+                changed = true;
+            }
+            if profile.accent == "#8ff0cf" {
+                profile.accent = "mint".to_owned();
                 changed = true;
             }
         }
@@ -252,14 +299,58 @@ mod tests {
     use super::*;
 
     #[test]
+    fn legacy_overlay_profiles_inherit_run_context_without_enabling_loadout() {
+        let profile: OverlayProfile =
+            serde_json::from_value(serde_json::json!({ "id": "legacy" })).unwrap();
+
+        assert!(profile.show_phase);
+        assert!(profile.show_boss_number);
+        assert!(!profile.show_loadout);
+    }
+
+    #[test]
+    fn on_disk_legacy_visibility_inherits_the_encounter_choice() {
+        let mut raw = serde_json::to_value(AppConfig::default()).unwrap();
+        let profile = raw["overlay_profiles"][0].as_object_mut().unwrap();
+        profile.insert("show_encounter".to_owned(), serde_json::json!(false));
+        profile.remove("show_phase");
+        profile.remove("show_boss_number");
+        let vr = raw["vr_overlay"].as_object_mut().unwrap();
+        vr.insert("show_encounter".to_owned(), serde_json::json!(false));
+        vr.remove("show_phase");
+        vr.remove("show_boss_number");
+
+        let mut config: AppConfig = serde_json::from_value(raw.clone()).unwrap();
+        assert!(config.overlay_profiles[0].show_phase);
+        assert!(config.overlay_profiles[0].show_boss_number);
+        assert!(config.vr_overlay.show_phase);
+        assert!(config.vr_overlay.show_boss_number);
+        assert!(config.inherit_legacy_run_context_visibility(&raw));
+        assert!(!config.overlay_profiles[0].show_phase);
+        assert!(!config.overlay_profiles[0].show_boss_number);
+        assert!(!config.vr_overlay.show_phase);
+        assert!(!config.vr_overlay.show_boss_number);
+    }
+
+    #[test]
     fn legacy_light_profiles_migrate_once_and_cannot_validate_again() {
         let mut config = AppConfig::default();
         config.overlay_profiles[0].theme = "light".to_owned();
 
         assert!(config.validate().is_err());
-        assert!(config.normalize_dark_overlay_themes());
+        assert!(config.normalize_overlay_profiles());
         assert_eq!(config.overlay_profiles[0].theme, "void");
         assert!(config.validate().is_ok());
-        assert!(!config.normalize_dark_overlay_themes());
+        assert!(!config.normalize_overlay_profiles());
+    }
+
+    #[test]
+    fn legacy_hex_accent_migrates_to_the_named_mint_swatch() {
+        let mut config = AppConfig::default();
+        config.overlay_profiles[0].accent = "#8ff0cf".to_owned();
+
+        assert!(config.normalize_overlay_profiles());
+        assert_eq!(config.overlay_profiles[0].accent, "mint");
+        assert!(!config.normalize_overlay_profiles());
     }
 }

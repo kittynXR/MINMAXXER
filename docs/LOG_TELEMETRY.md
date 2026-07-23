@@ -29,13 +29,15 @@ This capability audit is based on the VRChat logs from July 21, 2026 and the Ecl
 ## Not present in the audited logs
 
 - Remote-player damage attribution from a single client's log.
+- Outgoing ability/action names. `STRIKE` and `NON-STRIKE` are the only logged local damage categories, not ability names.
 - Healing or healer attribution.
 - Buff/debuff applied, removed, stack, duration, or ownership state.
 - Player or enemy health, shields, absorbs, mitigation, or avoidable-damage flags.
 - Critical hits, misses, blocks, revives, player deaths, or downed state.
 - Regular-enemy kills; pool retirement cannot be used as a kill event.
-- Authoritative hate/aggro target, clear/wipe outcome, loot, score, or rewards.
+- Authoritative hate/aggro target, clear/wipe outcome, loot, score, gem balance/spending, or rewards.
 - Shop item identities, selected upgrades, equipment, or stack counts. Repeated session save/load markers contain no item payload and must not be interpreted as purchases or a loadout.
+- Current song, music title, or an Ecliptica-scoped media identifier.
 
 Names such as `BuffBug` and component references such as `SyrupDebuff` are object/asset text, not gameplay effect telemetry.
 

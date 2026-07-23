@@ -26,7 +26,7 @@ VRChat output_log_*.txt
 - SQLite uses WAL mode and batched inserts keyed by source path and byte offset.
 - Live clients share a Tokio watch channel, so only the newest snapshot is retained.
 - OBS and desktop overlays reuse the same loopback HTML/CSS/JavaScript assets.
-- The VR overlay avoids a second browser process. It rasterizes a small HUD with `fontdue`, reuses a 1024 × 512 RGBA allocation, redraws only on changes, and caps OpenVR uploads at 4 Hz.
+- The VR overlay avoids a second browser process. It rasterizes a dense HUD with `fontdue`, reuses a 1024 × 512 RGBA allocation, redraws only on changes, and caps OpenVR uploads at 4 Hz. Width, opacity, curvature, and transform writes are cached separately so a texture redraw does not reconfigure the compositor.
 - SteamVR is not initialized until the VR output is enabled.
 
 ## Process boundaries

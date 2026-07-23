@@ -2,7 +2,7 @@
 //!
 //! OpenVR is deliberately initialized only while [`VrOverlaySettings::enabled`] is true. The
 //! worker keeps texture uploads change-driven, limits them to four per second, and only polls the
-//! tiny legacy controller-state API while opt-in controller placement is enabled. A missing or
+//! tiny legacy controller-state API while explicit move mode is unlocked. A missing or
 //! stopped SteamVR runtime is reported through [`VrOverlayStatus`] and never terminates the
 //! application.
 
@@ -28,7 +28,6 @@ const MIN_SUBMIT_INTERVAL: Duration = Duration::from_millis(250);
 const RECONNECT_INTERVAL: Duration = Duration::from_secs(5);
 const CONTROLLER_IDLE_INTERVAL: Duration = Duration::from_millis(50);
 const CONTROLLER_PLACING_INTERVAL: Duration = Duration::from_millis(16);
-const DUAL_GRIP_HOLD: Duration = Duration::from_millis(900);
 
 // openvr 0.9's safe-looking `create_overlay(&str, &str)` wrapper forwards `str::as_ptr()` to a C
 // API without appending a terminator. These constants MUST retain their trailing NUL bytes.
@@ -38,10 +37,12 @@ const OVERLAY_NAME: &str = "MINMAXXER Ecliptica HUD\0";
 /// User-facing configuration for the native SteamVR overlay.
 ///
 /// Coordinates are metres in HMD-local space: positive X is right, positive Y is up, and
-/// negative Z is in front of the headset. Controller placement is explicitly opt-in. When it is
-/// enabled, holding both grips for 900 ms attaches the existing panel pose to the right
-/// controller; releasing the right grip freezes that pose relative to the HMD. The grabbed pose
-/// is runtime-only and is cleared when the VR HUD is disabled or XYZ settings change.
+/// negative Z is in front of the headset. `controller_grab_enabled` is an explicit unlock mode:
+/// each right-grip press immediately attaches the existing panel pose to the right controller,
+/// and release freezes that pose relative to the HMD while continuing to listen for another
+/// right-grip grab. Turning the toggle off finalizes the current pose and locks the HUD there.
+/// The grabbed pose is runtime-only and is cleared when the VR HUD is disabled or XYZ settings
+/// change.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct VrOverlaySettings {
@@ -73,11 +74,11 @@ impl Default for VrOverlaySettings {
     fn default() -> Self {
         Self {
             enabled: false,
-            width_m: 0.78,
+            width_m: 0.86,
             x: 0.30,
             y: 0.08,
             z: -1.05,
-            opacity: 0.92,
+            opacity: 1.0,
             curvature: 0.08,
             rows: 5,
             controller_grab_enabled: false,
@@ -115,11 +116,11 @@ impl VrOverlaySettings {
     /// Returns values safe to pass to OpenVR. This also protects against non-finite values arriving
     /// from a hand-edited settings file or JavaScript bridge.
     pub fn sanitized(mut self) -> Self {
-        self.width_m = finite_clamped(self.width_m, 0.10, 3.0, 0.78);
+        self.width_m = finite_clamped(self.width_m, 0.10, 3.0, 0.86);
         self.x = finite_clamped(self.x, -5.0, 5.0, 0.30);
         self.y = finite_clamped(self.y, -5.0, 5.0, 0.08);
         self.z = finite_clamped(self.z, -10.0, -0.05, -1.05);
-        self.opacity = finite_clamped(self.opacity, 0.0, 1.0, 0.92);
+        self.opacity = finite_clamped(self.opacity, 0.0, 1.0, 1.0);
         self.curvature = finite_clamped(self.curvature, 0.0, 1.0, 0.08);
         self.rows = self.rows.clamp(1, 8);
         self.recent_hit_rows = self.recent_hit_rows.clamp(1, 8);
@@ -218,7 +219,6 @@ pub fn spawn_vr_overlay(
 
 #[derive(Debug, Clone, Copy, Default)]
 struct GripInput {
-    left_grip: Option<bool>,
     right_grip: Option<bool>,
     controllers_available: bool,
     right_pose_available: bool,
@@ -234,7 +234,6 @@ struct ControllerPoll {
 enum GrabPhase {
     #[default]
     Waiting,
-    Arming(Duration),
     Moving,
     AwaitRelease,
 }
@@ -249,43 +248,38 @@ enum GestureAction {
 #[derive(Debug, Clone, Copy, Default)]
 struct GrabGesture {
     phase: GrabPhase,
+    right_was_pressed: bool,
 }
 
 impl GrabGesture {
-    fn update(&mut self, input: GripInput, elapsed: Duration) -> GestureAction {
-        let both_pressed = input.left_grip == Some(true) && input.right_grip == Some(true);
-        match self.phase {
-            GrabPhase::Waiting if both_pressed => {
-                self.phase = GrabPhase::Arming(Duration::ZERO);
+    fn update(&mut self, input: GripInput, _elapsed: Duration) -> GestureAction {
+        let right_pressed = input.right_grip == Some(true);
+        let just_pressed = right_pressed && !self.right_was_pressed;
+        let action = match self.phase {
+            GrabPhase::Waiting if just_pressed && input.right_pose_available => {
+                self.phase = GrabPhase::Moving;
+                GestureAction::BeginMoving
             }
-            GrabPhase::Arming(held) if both_pressed => {
-                let held = held.saturating_add(elapsed);
-                if held >= DUAL_GRIP_HOLD && input.right_pose_available {
-                    self.phase = GrabPhase::Moving;
-                    return GestureAction::BeginMoving;
-                }
-                self.phase = GrabPhase::Arming(held);
-            }
-            GrabPhase::Arming(_) => self.phase = GrabPhase::Waiting,
-            GrabPhase::Moving if input.right_grip == Some(false) && input.right_pose_available => {
-                self.phase = GrabPhase::AwaitRelease;
-                return GestureAction::FinishMoving;
-            }
-            GrabPhase::AwaitRelease
-                if input.left_grip != Some(true) && input.right_grip != Some(true) =>
-            {
+            // If tracking is briefly lost on release, keep the controller-relative transform
+            // alive until a valid pose can be converted back to HMD space.
+            GrabPhase::Moving if !right_pressed && input.right_pose_available => {
                 self.phase = GrabPhase::Waiting;
+                GestureAction::FinishMoving
             }
-            _ => {}
-        }
-        GestureAction::None
+            GrabPhase::AwaitRelease if !right_pressed => {
+                self.phase = GrabPhase::Waiting;
+                GestureAction::None
+            }
+            _ => GestureAction::None,
+        };
+        self.right_was_pressed = right_pressed;
+        action
     }
 
     fn placement_state(self, controllers_available: bool) -> VrPlacementState {
         match self.phase {
             GrabPhase::Waiting if controllers_available => VrPlacementState::Listening,
             GrabPhase::Waiting => VrPlacementState::Unavailable,
-            GrabPhase::Arming(_) => VrPlacementState::Arming,
             GrabPhase::Moving => VrPlacementState::Moving,
             GrabPhase::AwaitRelease => VrPlacementState::Placed,
         }
@@ -300,7 +294,7 @@ impl GrabGesture {
     }
 
     fn reset(&mut self) {
-        self.phase = GrabPhase::Waiting;
+        *self = Self::default();
     }
 }
 
@@ -394,8 +388,17 @@ pub async fn run_vr_overlay(
                 if !settings.controller_grab_enabled {
                     if current_session.is_controller_placing() {
                         let fallback = effective_transform(&settings, runtime_transform);
-                        if let Err(error) = current_session.cancel_controller_placement(fallback) {
-                            placement_error = Some(error);
+                        match current_session.finish_controller_placement() {
+                            Ok(transform) => {
+                                runtime_transform = Some(transform);
+                                placement_error = None;
+                            }
+                            Err(error) => {
+                                let _ = current_session.cancel_controller_placement(fallback);
+                                placement_error = Some(format!(
+                                    "HUD move mode was locked, but the final controller pose could not be read; the prior position was restored: {error}"
+                                ));
+                            }
                         }
                     }
                     gesture.reset();
@@ -635,27 +638,24 @@ fn update_placement_status(
     error: Option<&str>,
 ) {
     let note = error.or(match state {
+        VrPlacementState::Disabled if status.enabled => Some("HUD locked in place"),
         VrPlacementState::Disabled => None,
         VrPlacementState::Listening => {
-            Some("Hold both controller grips for 0.9 seconds to move the HUD")
+            Some("HUD unlocked; press and hold the right grip to move it, then release to place")
         }
         VrPlacementState::Arming if right_pose_available => {
-            Some("Keep holding both grips to enter HUD placement")
+            Some("HUD unlocked; waiting for the next right-grip press")
         }
-        VrPlacementState::Arming => {
-            Some("Keep holding both grips; waiting for right-controller tracking")
-        }
+        VrPlacementState::Arming => Some("HUD unlocked; waiting for right-controller tracking"),
         VrPlacementState::Moving if right_pose_available => {
             Some("Move the right controller; release its grip to place the HUD")
         }
         VrPlacementState::Moving => {
             Some("HUD move is active; waiting for right-controller tracking")
         }
-        VrPlacementState::Placed => {
-            Some("HUD placed for this VR session; release both grips (position is runtime-only)")
-        }
+        VrPlacementState::Placed => Some("Release the right grip before grabbing the HUD again"),
         VrPlacementState::Unavailable => {
-            Some("Controller placement needs two available SteamVR controllers")
+            Some("HUD unlocked; waiting for the right SteamVR controller")
         }
     });
     if status.placement_state != state
@@ -693,7 +693,9 @@ struct VrSession {
     handle: OverlayHandle,
     renderer: HudRenderer,
     controller_placement: Option<ActiveControllerPlacement>,
+    applied: AppliedOverlayState,
     visible: bool,
+    visibility_dirty: bool,
     _context: Context,
 }
 
@@ -701,6 +703,51 @@ struct VrSession {
 struct ActiveControllerPlacement {
     right_index: TrackedDeviceIndex,
     controller_to_overlay: RigidTransform,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TransformKind {
+    Hmd,
+    Controller(u32),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct AppliedTransform {
+    kind: TransformKind,
+    transform: RigidTransform,
+}
+
+/// Last compositor properties that were successfully applied. Raw texture submissions do not
+/// need to reassert any of these values, and repeatedly doing so can produce visible SteamVR
+/// flicker. A fresh session starts empty and records a property only after its FFI call succeeds.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+struct AppliedOverlayState {
+    width_m: Option<f32>,
+    opacity: Option<f32>,
+    curvature: Option<f32>,
+    transform: Option<AppliedTransform>,
+}
+
+impl AppliedOverlayState {
+    fn needs_width(self, value: f32) -> bool {
+        self.width_m != Some(value)
+    }
+
+    fn needs_opacity(self, value: f32) -> bool {
+        self.opacity != Some(value)
+    }
+
+    fn needs_curvature(self, value: f32) -> bool {
+        self.curvature != Some(value)
+    }
+
+    fn transform_change(self, next: AppliedTransform) -> (bool, bool) {
+        (
+            self.transform != Some(next),
+            self.transform
+                .is_some_and(|current| current.kind != next.kind),
+        )
+    }
 }
 
 impl VrSession {
@@ -762,7 +809,9 @@ impl VrSession {
             handle,
             renderer,
             controller_placement: None,
+            applied: AppliedOverlayState::default(),
             visible: false,
+            visibility_dirty: false,
             _context: context,
         })
     }
@@ -775,15 +824,24 @@ impl VrSession {
         hmd_transform: RigidTransform,
     ) -> Result<(), String> {
         let settings = settings.sanitized();
-        self.overlay
-            .set_width(self.handle, settings.width_m)
-            .map_err(|error| format!("SteamVR rejected HUD width: {error:?}"))?;
-        self.overlay
-            .set_opacity(self.handle, settings.opacity)
-            .map_err(|error| format!("SteamVR rejected HUD opacity: {error:?}"))?;
-        self.overlay
-            .set_curvature(self.handle, settings.curvature)
-            .map_err(|error| format!("SteamVR rejected HUD curvature: {error:?}"))?;
+        if self.applied.needs_width(settings.width_m) {
+            self.overlay
+                .set_width(self.handle, settings.width_m)
+                .map_err(|error| format!("SteamVR rejected HUD width: {error:?}"))?;
+            self.applied.width_m = Some(settings.width_m);
+        }
+        if self.applied.needs_opacity(settings.opacity) {
+            self.overlay
+                .set_opacity(self.handle, settings.opacity)
+                .map_err(|error| format!("SteamVR rejected HUD opacity: {error:?}"))?;
+            self.applied.opacity = Some(settings.opacity);
+        }
+        if self.applied.needs_curvature(settings.curvature) {
+            self.overlay
+                .set_curvature(self.handle, settings.curvature)
+                .map_err(|error| format!("SteamVR rejected HUD curvature: {error:?}"))?;
+            self.applied.curvature = Some(settings.curvature);
+        }
 
         if self.controller_placement.is_none() {
             self.set_hmd_transform(hmd_transform)?;
@@ -802,19 +860,11 @@ impl VrSession {
             )
             .map_err(|error| format!("SteamVR texture upload failed: {error:?}"))?;
 
-        if !self.visible {
-            self.overlay
-                .set_visibility(self.handle, true)
-                .map_err(|error| format!("SteamVR could not show the HUD: {error:?}"))?;
-            self.visible = true;
-        }
+        self.ensure_visible()?;
         Ok(())
     }
 
     fn poll_controllers(&self, placement_active: bool) -> ControllerPoll {
-        let left_index = self
-            .system
-            .tracked_device_index_for_controller_role(TrackedControllerRole::LeftHand);
         let right_index = self
             .controller_placement
             .map(|placement| placement.right_index)
@@ -822,21 +872,15 @@ impl VrSession {
                 self.system
                     .tracked_device_index_for_controller_role(TrackedControllerRole::RightHand)
             });
-        let left_grip = left_index
-            .and_then(|index| self.system.controller_state(index))
-            .map(|state| grip_pressed(state.button_pressed));
         let right_grip = right_index
             .and_then(|index| self.system.controller_state(index))
             .map(|state| grip_pressed(state.button_pressed));
-        let controllers_available = if placement_active {
-            right_grip.is_some()
-        } else {
-            left_grip.is_some() && right_grip.is_some()
-        };
-        let both_pressed = left_grip == Some(true) && right_grip == Some(true);
+        let controllers_available = right_grip.is_some();
         // SteamVR itself updates a tracked-device-relative overlay while it is moving. A pose read
-        // is only needed to arm the gesture or convert the final released pose back into HMD space.
-        let pose_needed = both_pressed || (placement_active && right_grip == Some(false));
+        // is only needed on the initial right-grip press or to convert the released pose back into
+        // HMD space.
+        let pose_needed = (!placement_active && right_grip == Some(true))
+            || (placement_active && right_grip == Some(false));
         let right_pose_available = if pose_needed {
             right_index
                 .and_then(|index| self.hmd_and_controller_poses(index))
@@ -846,7 +890,6 @@ impl VrSession {
         };
         ControllerPoll {
             input: GripInput {
-                left_grip,
                 right_grip,
                 controllers_available,
                 right_pose_available,
@@ -867,12 +910,7 @@ impl VrSession {
         let controller_to_overlay = world_from_controller
             .inverse_rigid()
             .multiply(world_from_overlay);
-        let openvr_transform = controller_to_overlay.to_openvr();
-        self.overlay
-            .set_transform_tracked_device_relative(self.handle, right_index, &openvr_transform)
-            .map_err(|error| {
-                format!("SteamVR rejected controller-relative placement: {error:?}")
-            })?;
+        self.set_controller_transform(right_index, controller_to_overlay)?;
         self.controller_placement = Some(ActiveControllerPlacement {
             right_index,
             controller_to_overlay,
@@ -908,6 +946,14 @@ impl VrSession {
     }
 
     fn set_hmd_transform(&mut self, transform: RigidTransform) -> Result<(), String> {
+        let next = AppliedTransform {
+            kind: TransformKind::Hmd,
+            transform,
+        };
+        let (changed, kind_changed) = self.applied.transform_change(next);
+        if !changed {
+            return Ok(());
+        }
         let openvr_transform = transform.to_openvr();
         self.overlay
             .set_transform_tracked_device_relative(
@@ -915,7 +961,57 @@ impl VrSession {
                 tracked_device_index::HMD,
                 &openvr_transform,
             )
-            .map_err(|error| format!("SteamVR rejected HUD placement: {error:?}"))
+            .map_err(|error| format!("SteamVR rejected HUD placement: {error:?}"))?;
+        self.applied.transform = Some(next);
+        self.reassert_visibility_after_transform_kind_change(kind_changed)
+    }
+
+    fn set_controller_transform(
+        &mut self,
+        right_index: TrackedDeviceIndex,
+        transform: RigidTransform,
+    ) -> Result<(), String> {
+        let next = AppliedTransform {
+            kind: TransformKind::Controller(right_index.0),
+            transform,
+        };
+        let (changed, kind_changed) = self.applied.transform_change(next);
+        if !changed {
+            return Ok(());
+        }
+        let openvr_transform = transform.to_openvr();
+        self.overlay
+            .set_transform_tracked_device_relative(self.handle, right_index, &openvr_transform)
+            .map_err(|error| {
+                format!("SteamVR rejected controller-relative placement: {error:?}")
+            })?;
+        self.applied.transform = Some(next);
+        self.reassert_visibility_after_transform_kind_change(kind_changed)
+    }
+
+    fn reassert_visibility_after_transform_kind_change(
+        &mut self,
+        kind_changed: bool,
+    ) -> Result<(), String> {
+        if kind_changed && self.visible {
+            // VROS observed that switching between device-relative transform kinds can make an
+            // otherwise-visible overlay disappear. Mark then immediately reconcile; if the call
+            // fails the dirty bit remains set for the next submission.
+            self.visibility_dirty = true;
+            self.ensure_visible()?;
+        }
+        Ok(())
+    }
+
+    fn ensure_visible(&mut self) -> Result<(), String> {
+        if !self.visible || self.visibility_dirty {
+            self.overlay
+                .set_visibility(self.handle, true)
+                .map_err(|error| format!("SteamVR could not show the HUD: {error:?}"))?;
+            self.visible = true;
+            self.visibility_dirty = false;
+        }
+        Ok(())
     }
 
     fn hmd_and_controller_poses(
@@ -945,6 +1041,7 @@ impl VrSession {
             let _ = self.overlay.set_visibility(self.handle, false);
             self.visible = false;
         }
+        self.visibility_dirty = false;
     }
 }
 
@@ -1044,7 +1141,7 @@ pub struct HudRenderer {
 }
 
 impl HudRenderer {
-    /// Loads Segoe UI from the Windows Fonts directory. Portable fallbacks keep renderer tests and
+    /// Loads a bold system UI font when available. Portable fallbacks keep renderer tests and
     /// development builds usable on non-Windows hosts.
     pub fn new() -> Result<Self, String> {
         let font = load_ui_font()?;
@@ -1103,12 +1200,22 @@ fn load_ui_font() -> Result<Font, String> {
     let mut candidates = Vec::new();
     if let Some(windows_dir) = std::env::var_os("WINDIR") {
         let fonts = PathBuf::from(windows_dir).join("Fonts");
+        candidates.push(fonts.join("segoeuib.ttf"));
+        candidates.push(fonts.join("arialbd.ttf"));
         candidates.push(fonts.join("segoeui.ttf"));
         candidates.push(fonts.join("SegoeUI.ttf"));
     }
+    candidates.push(PathBuf::from(r"C:\Windows\Fonts\segoeuib.ttf"));
+    candidates.push(PathBuf::from(r"C:\Windows\Fonts\arialbd.ttf"));
     candidates.push(PathBuf::from(r"C:\Windows\Fonts\segoeui.ttf"));
     candidates.push(PathBuf::from(
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    ));
+    candidates.push(PathBuf::from(
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    ));
+    candidates.push(PathBuf::from(
+        "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
     ));
     candidates.push(PathBuf::from(
         "/System/Library/Fonts/Supplemental/Arial.ttf",
@@ -1128,7 +1235,9 @@ fn load_ui_font() -> Result<Font, String> {
     } else {
         failures.join(", ")
     };
-    Err(format!("Could not load Segoe UI for the VR HUD: {detail}"))
+    Err(format!(
+        "Could not load a system UI font for the VR HUD: {detail}"
+    ))
 }
 
 #[derive(Clone, Copy)]
@@ -1146,6 +1255,12 @@ const VIOLET: Color = Color(177, 123, 255, 255);
 const ORANGE: Color = Color(255, 170, 78, 255);
 const RED: Color = Color(255, 101, 120, 255);
 const GREEN: Color = Color(103, 232, 166, 255);
+const UNAVAILABLE_TELEMETRY: [(&str, &str); 4] = [
+    ("HP", "NOT LOGGED"),
+    ("HEALING", "NOT LOGGED"),
+    ("GEMS", "NOT LOGGED"),
+    ("SONG", "NOT LOGGED"),
+];
 
 fn render_frame(
     font: &Font,
@@ -1159,223 +1274,622 @@ fn render_frame(
         pixels.len(),
         HUD_TEXTURE_WIDTH * HUD_TEXTURE_HEIGHT * HUD_BYTES_PER_PIXEL
     );
-    fill_rounded_rect(pixels, 12, 12, 1000, 488, 24, PANEL);
-    fill_rounded_rect(pixels, 30, 29, 8, 38, 4, CYAN);
-    draw_text(font, glyphs, pixels, "MINMAXXER", 52, 65, 29, WHITE, 300);
+    fill_rounded_rect(pixels, 8, 8, 1008, 496, 22, PANEL);
+    fill_rounded_rect(pixels, 24, 23, 8, 48, 4, CYAN);
+    draw_text(font, glyphs, pixels, "MINMAXXER", 44, 64, 36, WHITE, 340);
     draw_text(
         font,
         glyphs,
         pixels,
-        "ECLIPTICA LIVE HUD",
-        245,
-        62,
-        17,
-        MUTED,
-        280,
+        "ECLIPTICA LIVE",
+        304,
+        60,
+        19,
+        CYAN,
+        250,
     );
 
-    let indicator = if snapshot.connected { GREEN } else { ORANGE };
-    fill_circle(pixels, 954, 48, 7, indicator);
+    if settings.show_status {
+        let indicator = if snapshot.connected { GREEN } else { ORANGE };
+        fill_circle(pixels, 982, 42, 7, indicator);
+        let connection = if snapshot.connected {
+            "LOG LIVE"
+        } else {
+            "WAITING"
+        };
+        draw_text_right(
+            font, glyphs, pixels, connection, 963, 49, 15, indicator, 150,
+        );
+    }
+    if let Some((placement, color)) = placement_header(placement_state) {
+        draw_text_right(font, glyphs, pixels, placement, 963, 70, 14, color, 300);
+    }
 
-    // Put the requested run-position fields first so a long encounter name can never clip them.
-    let mut context = Vec::with_capacity(3);
+    let context = native_hud_context(snapshot, settings);
+    draw_text(font, glyphs, pixels, &context.line, 44, 96, 19, WHITE, 920);
+
+    fill_rounded_rect(pixels, 24, 105, 976, 35, 8, Color(23, 31, 49, 230));
+    fill_rounded_rect(pixels, 24, 105, 6, 35, 3, ORANGE);
+    draw_text(
+        font,
+        glyphs,
+        pixels,
+        &context.focus,
+        41,
+        130,
+        19,
+        if snapshot.focus.is_some() {
+            ORANGE
+        } else {
+            MUTED
+        },
+        940,
+    );
+
+    draw_dps_panel(font, glyphs, pixels, snapshot, settings, 24, 150, 310, 288);
+    draw_outgoing_feed(font, glyphs, pixels, snapshot, settings, 346, 150, 326, 288);
+    draw_incoming_feed(font, glyphs, pixels, snapshot, settings, 684, 150, 316, 288);
+    draw_unavailable_strip(font, glyphs, pixels);
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NativeHudContext {
+    line: String,
+    focus: String,
+}
+
+fn native_hud_context(snapshot: &EngineSnapshot, settings: &VrOverlaySettings) -> NativeHudContext {
+    let mut parts = Vec::with_capacity(4);
     if settings.show_phase {
-        if let Some(phase_name) = snapshot.run_context.phase_name.as_ref() {
-            let final_eye = snapshot
-                .run_context
-                .progress
-                .is_some_and(|progress| progress >= 0.999)
-                && [
-                    snapshot.stage.as_deref(),
-                    Some(snapshot.encounter.name.as_str()),
-                ]
-                .into_iter()
-                .flatten()
-                .any(|name| name.to_ascii_lowercase().contains("bringer"));
-            let phase = if final_eye {
-                "ECLIPSE (EYE)".to_owned()
-            } else {
-                snapshot
-                    .run_context
-                    .progress
-                    .map(|progress| format!("{phase_name} {:.0}%", progress * 100.0))
-                    .unwrap_or_else(|| phase_name.clone())
-            };
-            context.push(phase);
-        }
+        let phase = snapshot
+            .run_context
+            .phase_name
+            .as_deref()
+            .unwrap_or("UNKNOWN");
+        let value = snapshot
+            .run_context
+            .progress
+            .map(|progress| format!(" {progress:.0}%", progress = progress * 100.0))
+            .unwrap_or_default();
+        parts.push(format!("PHASE {phase}{value}"));
     }
     if settings.show_boss_number {
-        if let Some(boss_number) = snapshot.run_context.boss_number {
-            let inferred = if snapshot.run_context.boss_number_inferred {
-                "~"
-            } else {
-                ""
-            };
-            let subphase = snapshot
-                .run_context
-                .boss_subphase
-                .filter(|subphase| *subphase > 1)
-                .map(|subphase| format!(" FORM {subphase}"))
-                .unwrap_or_default();
-            context.push(format!("BOSS {inferred}#{boss_number:02}{subphase}"));
-        }
+        let round = snapshot
+            .run_context
+            .boss_number
+            .map(|number| {
+                let inferred = if snapshot.run_context.boss_number_inferred {
+                    "~"
+                } else {
+                    ""
+                };
+                format!("ROUND {inferred}{number:02}/13")
+            })
+            .unwrap_or_else(|| "ROUND --/13".to_owned());
+        parts.push(round);
     }
-    if settings.show_encounter && !snapshot.encounter.name.is_empty() {
-        context.push(snapshot.encounter.name.clone());
+    if settings.show_encounter {
+        let stage = snapshot
+            .stage
+            .as_deref()
+            .map(friendly_entity_label)
+            .unwrap_or_else(|| "NOT STARTED".to_owned());
+        parts.push(format!("STAGE {stage}"));
+        let boss = if snapshot.encounter.kind == "boss" && !snapshot.encounter.name.is_empty() {
+            friendly_entity_label(&snapshot.encounter.name)
+        } else {
+            "NOT STARTED".to_owned()
+        };
+        parts.push(format!("BOSS {boss}"));
     }
-    if settings.show_status
-        && !snapshot.status.is_empty()
-        && (!snapshot.connected || !snapshot.in_world || !snapshot.encounter.active)
-    {
-        context.push(snapshot.status.clone());
+    if parts.is_empty() {
+        parts.push("ECLIPTICA RUN CONTEXT HIDDEN".to_owned());
     }
-    let placement_banner = match placement_state {
-        VrPlacementState::Arming => Some(("HOLD BOTH GRIPS...", ORANGE)),
-        VrPlacementState::Moving => Some(("MOVE HUD - RELEASE RIGHT GRIP", GREEN)),
-        VrPlacementState::Placed => Some(("HUD PLACED - RELEASE BOTH GRIPS", CYAN)),
-        _ => None,
+
+    let active_boss = snapshot.encounter.active && snapshot.encounter.kind == "boss";
+    let focus = if !settings.show_focus {
+        "BOSS TARGET? HIDDEN".to_owned()
+    } else if !active_boss {
+        "BOSS TARGET? NO ACTIVE BOSS".to_owned()
+    } else if let Some(focus) = snapshot.focus.as_ref() {
+        format!(
+            "BOSS TARGET? {}  |  {} CONFIDENCE  |  {} OLD",
+            focus.player.to_ascii_uppercase(),
+            focus.confidence.to_ascii_uppercase(),
+            format_age(focus.age_seconds)
+        )
+    } else {
+        "BOSS TARGET? ACQUIRING OWNERSHIP SIGNAL".to_owned()
     };
-    let focus_visible = placement_banner.is_none() && settings.show_focus;
-    if !context.is_empty() {
+    NativeHudContext {
+        line: parts.join("  |  "),
+        focus,
+    }
+}
+
+fn placement_header(state: VrPlacementState) -> Option<(&'static str, Color)> {
+    match state {
+        VrPlacementState::Listening => Some(("MOVE UNLOCKED - RIGHT GRIP TO GRAB", CYAN)),
+        VrPlacementState::Moving => Some(("MOVING - RELEASE RIGHT GRIP TO PLACE", GREEN)),
+        VrPlacementState::Unavailable => {
+            Some(("MOVE UNLOCKED - RIGHT CONTROLLER UNAVAILABLE", ORANGE))
+        }
+        VrPlacementState::Arming => Some(("MOVE UNLOCKED - RIGHT GRIP TO GRAB", ORANGE)),
+        VrPlacementState::Placed => Some(("RELEASE RIGHT GRIP", CYAN)),
+        VrPlacementState::Disabled => None,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_dps_panel(
+    font: &Font,
+    glyphs: &mut HashMap<GlyphKey, CachedGlyph>,
+    pixels: &mut [u8],
+    snapshot: &EngineSnapshot,
+    settings: &VrOverlaySettings,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+) {
+    fill_rounded_rect(pixels, x, y, width, height, 13, PANEL_ALT);
+    let segment = if snapshot.encounter.kind == "boss" {
+        "BOSS FIGHT DPS"
+    } else {
+        "PRE-BOSS DPS"
+    };
+    draw_text(
+        font,
+        glyphs,
+        pixels,
+        segment,
+        x + 15,
+        y + 27,
+        18,
+        CYAN,
+        width - 145,
+    );
+    let current_dps = if settings.show_rolling_dps {
+        format!("{} /s", compact_number(snapshot.outgoing.rolling_5s))
+    } else {
+        "HIDDEN".to_owned()
+    };
+    draw_text_right(
+        font,
+        glyphs,
+        pixels,
+        &current_dps,
+        x + width - 14,
+        y + 32,
+        25,
+        WHITE,
+        130,
+    );
+
+    let graph_x = x + 15;
+    let graph_y = y + 50;
+    let graph_width = width - 30;
+    let graph_height = 153;
+    fill_rounded_rect(
+        pixels,
+        graph_x,
+        graph_y,
+        graph_width,
+        graph_height,
+        7,
+        Color(6, 11, 22, 220),
+    );
+    if settings.show_rolling_dps {
+        draw_dps_graph(
+            font,
+            glyphs,
+            pixels,
+            snapshot,
+            graph_x,
+            graph_y,
+            graph_width,
+            graph_height,
+        );
+    } else {
         draw_text(
             font,
             glyphs,
             pixels,
-            &context.join("  |  "),
-            52,
-            101,
+            "DPS GRAPH HIDDEN",
+            graph_x + 18,
+            graph_y + 84,
             18,
-            MUTED,
-            if focus_visible || placement_banner.is_some() {
-                555
-            } else {
-                906
-            },
+            DIM,
+            graph_width - 36,
         );
     }
-    if let Some((message, color)) = placement_banner {
-        draw_text_right(font, glyphs, pixels, message, 968, 101, 16, color, 342);
-    } else if settings.show_focus {
-        // Ecliptica exposes no authoritative hate table. Keep the question mark and confidence
-        // visible so this ownership-derived boss match can never be mistaken for confirmed aggro.
-        let active_boss = snapshot.encounter.active && snapshot.encounter.kind == "boss";
-        let message = if !active_boss {
-            "BOSS TARGET? NO ACTIVE BOSS".to_owned()
-        } else if let Some(focus) = snapshot.focus.as_ref() {
-            format!(
-                "BOSS TARGET? {}  |  {}  |  {}",
-                focus.player,
-                focus.confidence.to_ascii_uppercase(),
-                format_age(focus.age_seconds)
-            )
-        } else {
-            "BOSS TARGET? ACQUIRING".to_owned()
-        };
-        draw_text_right(font, glyphs, pixels, &message, 968, 101, 17, ORANGE, 322);
-    }
 
-    let mut metrics: Vec<(&str, String, Color)> = Vec::with_capacity(4);
-    if settings.show_rolling_dps {
-        metrics.push((
-            "5 SECOND DPS",
-            format!("{} /s", compact_number(snapshot.outgoing.rolling_5s)),
-            CYAN,
-        ));
-    }
-    if settings.show_total_damage {
-        metrics.push((
-            "TOTAL DAMAGE",
-            compact_number(snapshot.outgoing.total),
-            VIOLET,
-        ));
-    }
-    if settings.show_incoming {
-        metrics.push(("DAMAGE TAKEN", compact_number(snapshot.incoming.total), RED));
-    }
-    if settings.show_loadout {
-        let summary = if !snapshot.loadout.available {
-            "NOT LOGGED".to_owned()
-        } else if snapshot.loadout.items.is_empty() {
-            "EMPTY".to_owned()
-        } else {
-            format!("{} ITEMS", snapshot.loadout.items.len())
-        };
-        metrics.push(("LOCAL LOADOUT", summary, VIOLET));
-    }
-
-    let list_top = if metrics.is_empty() {
-        122
+    draw_text(
+        font,
+        glyphs,
+        pixels,
+        "SEGMENT DAMAGE",
+        x + 15,
+        y + 229,
+        15,
+        MUTED,
+        width - 30,
+    );
+    let total = if settings.show_total_damage {
+        compact_number(snapshot.outgoing.total)
     } else {
-        draw_metric_cards(font, glyphs, pixels, &metrics);
-        240
+        "HIDDEN".to_owned()
     };
-    let list_bottom = 483;
-    let stats_enabled = settings.show_players || settings.show_attacks;
-    let hits_enabled = settings.show_recent_hits;
+    draw_text(
+        font,
+        glyphs,
+        pixels,
+        &total,
+        x + 15,
+        y + 274,
+        31,
+        VIOLET,
+        width - 30,
+    );
+}
 
-    match (stats_enabled, hits_enabled) {
-        (true, true) => {
-            draw_stats_column(
-                font,
-                glyphs,
-                pixels,
-                snapshot,
-                settings,
-                31,
-                list_top,
-                469,
-                list_bottom - list_top,
-            );
-            draw_recent_hits_column(
-                font,
-                glyphs,
-                pixels,
-                snapshot,
-                settings,
-                518,
-                list_top,
-                475,
-                list_bottom - list_top,
-            );
-        }
-        (true, false) => draw_stats_column(
+#[allow(clippy::too_many_arguments)]
+fn draw_dps_graph(
+    font: &Font,
+    glyphs: &mut HashMap<GlyphKey, CachedGlyph>,
+    pixels: &mut [u8],
+    snapshot: &EngineSnapshot,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+) {
+    let maximum = snapshot
+        .timeline
+        .iter()
+        .map(|point| point.rolling_dps)
+        .filter(|value| value.is_finite() && *value >= 0.0)
+        .fold(snapshot.outgoing.rolling_5s.max(0.0), f64::max);
+    let count = snapshot
+        .timeline
+        .iter()
+        .filter(|point| point.rolling_dps.is_finite() && point.rolling_dps >= 0.0)
+        .count();
+
+    for grid in 1..4 {
+        let grid_y = y + grid * height / 4;
+        draw_line(
+            pixels,
+            x + 8,
+            grid_y,
+            x + width - 8,
+            grid_y,
+            Color(49, 65, 91, 95),
+            1,
+        );
+    }
+    if count < 2 || maximum <= 0.0 {
+        draw_text(
             font,
             glyphs,
             pixels,
-            snapshot,
-            settings,
-            31,
-            list_top,
-            962,
-            list_bottom - list_top,
-        ),
-        (false, true) => draw_recent_hits_column(
+            "WAITING FOR SEGMENT DAMAGE",
+            x + 14,
+            y + height / 2 + 7,
+            16,
+            DIM,
+            width - 28,
+        );
+        return;
+    }
+
+    let plot_left = x + 8;
+    let plot_right = x + width - 8;
+    let plot_top = y + 12;
+    let plot_bottom = y + height - 12;
+    let mut previous = None;
+    for (visible_index, point) in snapshot
+        .timeline
+        .iter()
+        .filter(|point| point.rolling_dps.is_finite() && point.rolling_dps >= 0.0)
+        .enumerate()
+    {
+        let fraction_x = visible_index as f64 / (count.saturating_sub(1)) as f64;
+        let fraction_y = (point.rolling_dps / maximum).clamp(0.0, 1.0);
+        let point_x = plot_left + ((plot_right - plot_left) as f64 * fraction_x).round() as i32;
+        let point_y = plot_bottom - ((plot_bottom - plot_top) as f64 * fraction_y).round() as i32;
+        if let Some((previous_x, previous_y)) = previous {
+            draw_line(pixels, previous_x, previous_y, point_x, point_y, CYAN, 2);
+        }
+        previous = Some((point_x, point_y));
+    }
+    draw_text(
+        font,
+        glyphs,
+        pixels,
+        &format!("PEAK {}", compact_number(maximum)),
+        x + 12,
+        y + 19,
+        13,
+        MUTED,
+        width - 24,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_outgoing_feed(
+    font: &Font,
+    glyphs: &mut HashMap<GlyphKey, CachedGlyph>,
+    pixels: &mut [u8],
+    snapshot: &EngineSnapshot,
+    settings: &VrOverlaySettings,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+) {
+    fill_rounded_rect(pixels, x, y, width, height, 13, PANEL_ALT);
+    draw_text(
+        font,
+        glyphs,
+        pixels,
+        "LAST 5 LOCAL DAMAGE",
+        x + 14,
+        y + 27,
+        18,
+        WHITE,
+        width - 135,
+    );
+    draw_text_right(
+        font,
+        glyphs,
+        pixels,
+        "CATEGORY ONLY",
+        x + width - 13,
+        y + 25,
+        13,
+        ORANGE,
+        122,
+    );
+    if !settings.show_recent_hits {
+        draw_text(
             font,
             glyphs,
             pixels,
-            snapshot,
-            settings,
-            31,
-            list_top,
-            962,
-            list_bottom - list_top,
-        ),
-        (false, false) => {
-            draw_text(
-                font,
-                glyphs,
+            "OUTGOING FEED HIDDEN",
+            x + 15,
+            y + 73,
+            18,
+            DIM,
+            width - 30,
+        );
+        return;
+    }
+
+    let hits = recent_local_hits(snapshot, settings.recent_hit_rows.min(5) as usize);
+    if hits.is_empty() {
+        draw_text(
+            font,
+            glyphs,
+            pixels,
+            "WAITING FOR LOCAL DAMAGE...",
+            x + 15,
+            y + 73,
+            18,
+            DIM,
+            width - 30,
+        );
+        return;
+    }
+
+    let mut row_y = y + 42;
+    for (index, hit) in hits.into_iter().enumerate() {
+        if index % 2 == 0 {
+            fill_rounded_rect(
                 pixels,
-                "Enable a player, attack, or recent-hit section in VR HUD settings.",
-                52,
-                list_top + 42,
-                20,
-                DIM,
-                900,
+                x + 8,
+                row_y,
+                width - 16,
+                45,
+                6,
+                Color(27, 39, 62, 150),
             );
         }
+        draw_text(
+            font,
+            glyphs,
+            pixels,
+            &compact_number(hit.amount),
+            x + 14,
+            row_y + 31,
+            25,
+            ORANGE,
+            105,
+        );
+        let category = if hit.damage_type.eq_ignore_ascii_case("non-strike")
+            || hit.damage_type.eq_ignore_ascii_case("non_strike")
+        {
+            "NON-STRIKE CAT."
+        } else if hit.damage_type.eq_ignore_ascii_case("strike") {
+            "STRIKE CAT."
+        } else {
+            "UNKNOWN CAT."
+        };
+        draw_text(
+            font,
+            glyphs,
+            pixels,
+            category,
+            x + 119,
+            row_y + 28,
+            17,
+            WHITE,
+            width - 190,
+        );
+        draw_text_right(
+            font,
+            glyphs,
+            pixels,
+            &format_age(hit.age_seconds),
+            x + width - 13,
+            row_y + 27,
+            14,
+            MUTED,
+            58,
+        );
+        row_y += 47;
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn draw_incoming_feed(
+    font: &Font,
+    glyphs: &mut HashMap<GlyphKey, CachedGlyph>,
+    pixels: &mut [u8],
+    snapshot: &EngineSnapshot,
+    settings: &VrOverlaySettings,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+) {
+    fill_rounded_rect(pixels, x, y, width, height, 13, PANEL_ALT);
+    draw_text(
+        font,
+        glyphs,
+        pixels,
+        "RECENT DAMAGE TAKEN",
+        x + 14,
+        y + 27,
+        18,
+        WHITE,
+        width - 142,
+    );
+    let total = if settings.show_incoming {
+        compact_number(snapshot.incoming.total)
+    } else {
+        "HIDDEN".to_owned()
+    };
+    draw_text_right(
+        font,
+        glyphs,
+        pixels,
+        &format!("TOTAL {total}"),
+        x + width - 13,
+        y + 25,
+        14,
+        RED,
+        135,
+    );
+    if !settings.show_incoming {
+        draw_text(
+            font,
+            glyphs,
+            pixels,
+            "INCOMING FEED HIDDEN",
+            x + 15,
+            y + 73,
+            18,
+            DIM,
+            width - 30,
+        );
+        return;
+    }
+
+    let incoming = recent_incoming_events(snapshot, 5);
+    if incoming.is_empty() {
+        draw_text(
+            font,
+            glyphs,
+            pixels,
+            "NO RECENT INCOMING DAMAGE",
+            x + 15,
+            y + 73,
+            17,
+            DIM,
+            width - 30,
+        );
+        return;
+    }
+
+    let mut row_y = y + 42;
+    for (index, event) in incoming.into_iter().enumerate() {
+        if index % 2 == 0 {
+            fill_rounded_rect(
+                pixels,
+                x + 8,
+                row_y,
+                width - 16,
+                45,
+                6,
+                Color(49, 27, 43, 150),
+            );
+        }
+        draw_text(
+            font,
+            glyphs,
+            pixels,
+            &compact_number(event.amount()),
+            x + 14,
+            row_y + 31,
+            24,
+            RED,
+            70,
+        );
+        draw_text(
+            font,
+            glyphs,
+            pixels,
+            &friendly_incoming_source(event.source.as_deref().unwrap_or_default()),
+            x + 87,
+            row_y + 28,
+            16,
+            WHITE,
+            width - 177,
+        );
+        draw_text_right(
+            font,
+            glyphs,
+            pixels,
+            &event.timestamp.format("%H:%M:%S").to_string(),
+            x + width - 13,
+            row_y + 27,
+            12,
+            MUTED,
+            76,
+        );
+        row_y += 47;
+    }
+}
+
+fn draw_unavailable_strip(
+    font: &Font,
+    glyphs: &mut HashMap<GlyphKey, CachedGlyph>,
+    pixels: &mut [u8],
+) {
+    fill_rounded_rect(pixels, 24, 448, 976, 39, 9, Color(14, 21, 35, 230));
+    let cell_width = 244;
+    for (index, (label, value)) in UNAVAILABLE_TELEMETRY.into_iter().enumerate() {
+        let cell_x = 24 + index as i32 * cell_width;
+        if index > 0 {
+            fill_rounded_rect(pixels, cell_x, 456, 1, 23, 0, Color(66, 79, 101, 150));
+        }
+        draw_text(font, glyphs, pixels, label, cell_x + 13, 474, 15, MUTED, 84);
+        draw_text_right(
+            font,
+            glyphs,
+            pixels,
+            value,
+            cell_x + cell_width - 13,
+            474,
+            16,
+            ORANGE,
+            135,
+        );
+    }
+}
+
+#[allow(dead_code)]
 fn draw_metric_cards(
     font: &Font,
     glyphs: &mut HashMap<GlyphKey, CachedGlyph>,
@@ -1414,7 +1928,7 @@ fn draw_metric_cards(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, dead_code)]
 fn draw_stats_column(
     font: &Font,
     glyphs: &mut HashMap<GlyphKey, CachedGlyph>,
@@ -1625,7 +2139,7 @@ fn draw_stat_row(
     fill_rounded_rect(pixels, x, y + 39, bar_width, 3, 1, accent);
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, dead_code)]
 fn draw_recent_hits_column(
     font: &Font,
     glyphs: &mut HashMap<GlyphKey, CachedGlyph>,
@@ -1725,6 +2239,81 @@ fn recent_local_hits(
     limit: usize,
 ) -> Vec<&minmaxxer_core::aggregate::RecentHit> {
     snapshot.recent_hits.iter().take(limit).collect()
+}
+
+fn recent_incoming_events(
+    snapshot: &EngineSnapshot,
+    limit: usize,
+) -> Vec<&minmaxxer_core::GameEvent> {
+    snapshot
+        .recent_events
+        .iter()
+        .rev()
+        .filter(|event| event.kind == minmaxxer_core::EventKind::DamageTaken)
+        .take(limit)
+        .collect()
+}
+
+fn friendly_entity_label(value: &str) -> String {
+    humanize_identifier(value)
+}
+
+fn friendly_incoming_source(value: &str) -> String {
+    let source = value.trim();
+    if source.is_empty() {
+        return "UNKNOWN SOURCE".to_owned();
+    }
+    if let Some(without_open) = source.strip_prefix('(') {
+        if let Some((actor, attack)) = without_open.split_once(')') {
+            let actor = humanize_identifier(actor);
+            let attack = humanize_identifier(attack);
+            return if attack.is_empty() {
+                actor
+            } else {
+                format!("{actor} - {attack}")
+            };
+        }
+    }
+    humanize_identifier(source)
+}
+
+fn humanize_identifier(value: &str) -> String {
+    let value = value
+        .trim()
+        .trim_end_matches("(Clone)")
+        .trim()
+        .strip_prefix("Stage_")
+        .or_else(|| value.trim().strip_prefix("stage_"))
+        .unwrap_or_else(|| value.trim());
+    let value = value
+        .strip_prefix("attack_")
+        .or_else(|| value.strip_prefix("Attack_"))
+        .unwrap_or(value);
+    let mut output = String::with_capacity(value.len() + 8);
+    let mut previous: Option<char> = None;
+    for character in value.chars() {
+        if character == '_' || character == '-' || character.is_whitespace() {
+            if !output.ends_with(' ') && !output.is_empty() {
+                output.push(' ');
+            }
+            previous = None;
+            continue;
+        }
+        let boundary = previous.is_some_and(|previous| {
+            (previous.is_ascii_lowercase() && character.is_ascii_uppercase())
+                || (previous.is_ascii_alphabetic() && character.is_ascii_digit())
+        });
+        if boundary && !output.ends_with(' ') {
+            output.push(' ');
+        }
+        output.push(character);
+        previous = Some(character);
+    }
+    output
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_uppercase()
 }
 
 fn friendly_label(value: &str) -> String {
@@ -1884,6 +2473,43 @@ fn blend_glyph(pixels: &mut [u8], x: i32, y: i32, glyph: &CachedGlyph, color: Co
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn draw_line(
+    pixels: &mut [u8],
+    mut x0: i32,
+    mut y0: i32,
+    x1: i32,
+    y1: i32,
+    color: Color,
+    thickness: i32,
+) {
+    let delta_x = (x1 - x0).abs();
+    let step_x = if x0 < x1 { 1 } else { -1 };
+    let delta_y = -(y1 - y0).abs();
+    let step_y = if y0 < y1 { 1 } else { -1 };
+    let mut error = delta_x + delta_y;
+    let radius = (thickness.max(1) - 1) / 2;
+    loop {
+        for offset_y in -radius..=radius {
+            for offset_x in -radius..=radius {
+                blend_pixel(pixels, x0 + offset_x, y0 + offset_y, color);
+            }
+        }
+        if x0 == x1 && y0 == y1 {
+            break;
+        }
+        let doubled = error * 2;
+        if doubled >= delta_y {
+            error += delta_y;
+            x0 += step_x;
+        }
+        if doubled <= delta_x {
+            error += delta_x;
+            y0 += step_y;
+        }
+    }
+}
+
 fn fill_circle(pixels: &mut [u8], center_x: i32, center_y: i32, radius: i32, color: Color) {
     for y in (center_y - radius)..=(center_y + radius) {
         for x in (center_x - radius)..=(center_x + radius) {
@@ -1966,7 +2592,9 @@ fn blend_pixel(pixels: &mut [u8], x: i32, y: i32, source: Color) {
 mod tests {
     use super::*;
     use chrono::NaiveDate;
-    use minmaxxer_core::{DamageTotals, EventKind, GameEvent, IncomingTotals, PlayerStats};
+    use minmaxxer_core::{
+        DamageTotals, EventKind, GameEvent, IncomingTotals, PlayerStats, TimelinePoint,
+    };
 
     #[test]
     fn legacy_vr_settings_inherit_run_context_without_enabling_loadout() {
@@ -1992,7 +2620,7 @@ mod tests {
         }
         .sanitized();
 
-        assert_eq!(settings.width_m, 0.78);
+        assert_eq!(settings.width_m, 0.86);
         assert_eq!(settings.x, 0.30);
         assert_eq!(settings.y, -5.0);
         assert_eq!(settings.z, -0.05);
@@ -2090,64 +2718,85 @@ mod tests {
     }
 
     #[test]
-    fn ordinary_single_grip_never_arms_controller_placement() {
+    fn right_grip_press_immediately_moves_and_release_finishes() {
         let mut gesture = GrabGesture::default();
-        for _ in 0..50 {
-            assert_eq!(
-                gesture.update(grips(true, false, true), Duration::from_millis(50)),
-                GestureAction::None
-            );
-        }
-        for _ in 0..50 {
-            assert_eq!(
-                gesture.update(grips(false, true, true), Duration::from_millis(50)),
-                GestureAction::None
-            );
-        }
+        assert_eq!(
+            gesture.update(right_grip(true, true), Duration::from_millis(50)),
+            GestureAction::BeginMoving
+        );
+        assert!(gesture.is_moving());
+        assert_eq!(gesture.placement_state(true), VrPlacementState::Moving);
+        assert_eq!(
+            gesture.update(right_grip(false, true), Duration::from_millis(16)),
+            GestureAction::FinishMoving
+        );
+        assert!(!gesture.is_moving());
         assert_eq!(gesture.placement_state(true), VrPlacementState::Listening);
     }
 
     #[test]
-    fn dual_grip_hold_then_right_release_completes_one_placement() {
+    fn release_keeps_move_mode_listening_for_a_second_grab() {
         let mut gesture = GrabGesture::default();
         assert_eq!(
-            gesture.update(grips(true, true, true), Duration::from_millis(50)),
-            GestureAction::None
+            gesture.update(right_grip(true, true), Duration::from_millis(50)),
+            GestureAction::BeginMoving
         );
-        for _ in 0..17 {
-            assert_eq!(
-                gesture.update(grips(true, true, true), Duration::from_millis(50)),
-                GestureAction::None
-            );
-        }
-        assert_eq!(gesture.placement_state(true), VrPlacementState::Arming);
         assert_eq!(
-            gesture.update(grips(true, true, true), Duration::from_millis(50)),
+            gesture.update(right_grip(false, true), Duration::from_millis(16)),
+            GestureAction::FinishMoving
+        );
+        assert_eq!(
+            gesture.update(right_grip(true, true), Duration::from_millis(50)),
             GestureAction::BeginMoving
         );
         assert!(gesture.is_moving());
+    }
 
-        // Loss of pose data must not freeze the panel at an unknown transform.
+    #[test]
+    fn release_waits_for_a_valid_pose_before_freezing() {
+        let mut gesture = GrabGesture::default();
         assert_eq!(
-            gesture.update(grips(true, false, false), Duration::from_millis(16)),
-            GestureAction::None
+            gesture.update(right_grip(true, true), Duration::from_millis(50)),
+            GestureAction::BeginMoving
         );
         assert_eq!(
-            gesture.update(grips(true, false, true), Duration::from_millis(16)),
+            gesture.update(right_grip(false, false), Duration::from_millis(16)),
+            GestureAction::None
+        );
+        assert!(gesture.is_moving());
+        assert_eq!(
+            gesture.update(right_grip(false, true), Duration::from_millis(16)),
             GestureAction::FinishMoving
         );
-        assert_eq!(gesture.placement_state(true), VrPlacementState::Placed);
-
-        // Both controls must be released before another dual-grip hold can arm.
-        assert_eq!(
-            gesture.update(grips(true, true, true), Duration::from_secs(2)),
-            GestureAction::None
-        );
-        assert_eq!(
-            gesture.update(grips(false, false, true), Duration::from_millis(50)),
-            GestureAction::None
-        );
         assert_eq!(gesture.placement_state(true), VrPlacementState::Listening);
+    }
+
+    #[test]
+    fn compositor_state_cache_only_reapplies_changed_properties_and_transform_kinds() {
+        let mut applied = AppliedOverlayState::default();
+        assert!(applied.needs_width(0.8));
+        assert!(applied.needs_opacity(0.9));
+        assert!(applied.needs_curvature(0.1));
+        applied.width_m = Some(0.8);
+        applied.opacity = Some(0.9);
+        applied.curvature = Some(0.1);
+        assert!(!applied.needs_width(0.8));
+        assert!(!applied.needs_opacity(0.9));
+        assert!(!applied.needs_curvature(0.1));
+
+        let transform = configured_transform(&VrOverlaySettings::default());
+        let hmd = AppliedTransform {
+            kind: TransformKind::Hmd,
+            transform,
+        };
+        assert_eq!(applied.transform_change(hmd), (true, false));
+        applied.transform = Some(hmd);
+        assert_eq!(applied.transform_change(hmd), (false, false));
+        let controller = AppliedTransform {
+            kind: TransformKind::Controller(2),
+            transform,
+        };
+        assert_eq!(applied.transform_change(controller), (true, true));
     }
 
     #[test]
@@ -2269,6 +2918,108 @@ mod tests {
         assert_eq!(hits[1].damage_type, "non-strike");
     }
 
+    #[test]
+    fn dense_context_names_phase_round_stage_boss_and_focus() {
+        let time = NaiveDate::from_ymd_opt(2026, 7, 22)
+            .unwrap()
+            .and_hms_opt(23, 14, 40)
+            .unwrap();
+        let snapshot = EngineSnapshot {
+            stage: Some("Stage_LostElysia".to_owned()),
+            encounter: minmaxxer_core::aggregate::LiveEncounter {
+                name: "CorusPhase2".to_owned(),
+                kind: "boss".to_owned(),
+                active: true,
+                ..minmaxxer_core::aggregate::LiveEncounter::default()
+            },
+            run_context: minmaxxer_core::RunContext {
+                progress: Some(0.604),
+                phase_name: Some("UMBRA".to_owned()),
+                boss_number: Some(9),
+                boss_number_inferred: false,
+                boss_subphase: Some(2),
+            },
+            focus: Some(minmaxxer_core::aggregate::FocusSignal {
+                player: "Local Player".to_owned(),
+                entity: "CorusPhase2".to_owned(),
+                observed_at: time,
+                age_seconds: 2.0,
+                confidence: "inferred".to_owned(),
+                evidence: "boss_network_ownership".to_owned(),
+                corroborating_hits: 0,
+                corroborated_at: None,
+                source_note: "Not authoritative hate.".to_owned(),
+            }),
+            ..EngineSnapshot::default()
+        };
+
+        let context = native_hud_context(&snapshot, &VrOverlaySettings::default());
+        assert!(context.line.contains("PHASE UMBRA 60%"));
+        assert!(context.line.contains("ROUND 09/13"));
+        assert!(context.line.contains("STAGE LOST ELYSIA"));
+        assert!(context.line.contains("BOSS CORUS PHASE 2"));
+        assert!(context.focus.contains("LOCAL PLAYER"));
+        assert!(context.focus.contains("INFERRED CONFIDENCE"));
+    }
+
+    #[test]
+    fn incoming_feed_uses_newest_damage_taken_and_prettifies_raw_sources() {
+        let time = NaiveDate::from_ymd_opt(2026, 7, 22)
+            .unwrap()
+            .and_hms_opt(23, 54, 0)
+            .unwrap();
+        let mut outgoing = event(1, time, EventKind::DamageDealt, "Local");
+        outgoing.source = Some("Local".to_owned());
+        let mut older = event(
+            2,
+            time + chrono::Duration::seconds(1),
+            EventKind::DamageTaken,
+            "Local",
+        );
+        older.source = Some("(Golden Grouch) attack_judgementAOE".to_owned());
+        let mut newer = event(
+            3,
+            time + chrono::Duration::seconds(2),
+            EventKind::DamageTaken,
+            "Local",
+        );
+        newer.source = Some("machinegunShooter2".to_owned());
+        let snapshot = EngineSnapshot {
+            recent_events: vec![outgoing, older, newer],
+            ..EngineSnapshot::default()
+        };
+
+        let incoming = recent_incoming_events(&snapshot, 5);
+        assert_eq!(incoming.len(), 2);
+        assert_eq!(incoming[0].sequence, 3);
+        assert_eq!(incoming[1].sequence, 2);
+        assert_eq!(
+            friendly_incoming_source("(Golden Grouch) attack_judgementAOE"),
+            "GOLDEN GROUCH - JUDGEMENT AOE"
+        );
+        assert_eq!(
+            friendly_incoming_source("machinegunShooter2"),
+            "MACHINEGUN SHOOTER 2"
+        );
+        assert_eq!(friendly_incoming_source(""), "UNKNOWN SOURCE");
+    }
+
+    #[test]
+    fn unavailable_native_fields_are_never_presented_as_zeroes() {
+        assert_eq!(
+            UNAVAILABLE_TELEMETRY,
+            [
+                ("HP", "NOT LOGGED"),
+                ("HEALING", "NOT LOGGED"),
+                ("GEMS", "NOT LOGGED"),
+                ("SONG", "NOT LOGGED"),
+            ]
+        );
+        assert!(UNAVAILABLE_TELEMETRY
+            .iter()
+            .all(|(_, value)| *value == "NOT LOGGED"));
+    }
+
     #[cfg(target_os = "windows")]
     #[test]
     fn renderer_produces_reusable_rgba_frame_with_transparent_margin() {
@@ -2324,7 +3075,69 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     #[test]
-    fn run_phase_boss_and_loadout_controls_change_the_native_hud() {
+    fn current_segment_timeline_draws_a_visible_dps_graph() {
+        let time = NaiveDate::from_ymd_opt(2026, 7, 22)
+            .unwrap()
+            .and_hms_opt(20, 0, 0)
+            .unwrap();
+        let snapshot = EngineSnapshot {
+            encounter: minmaxxer_core::aggregate::LiveEncounter {
+                name: "Corus".to_owned(),
+                kind: "boss".to_owned(),
+                active: true,
+                ..minmaxxer_core::aggregate::LiveEncounter::default()
+            },
+            outgoing: DamageTotals {
+                total: 12_400.0,
+                rolling_5s: 900.0,
+                ..DamageTotals::default()
+            },
+            timeline: vec![
+                TimelinePoint {
+                    timestamp: time,
+                    rolling_dps: 220.0,
+                    ..TimelinePoint::default()
+                },
+                TimelinePoint {
+                    timestamp: time + chrono::Duration::seconds(1),
+                    rolling_dps: 900.0,
+                    ..TimelinePoint::default()
+                },
+                TimelinePoint {
+                    timestamp: time + chrono::Duration::seconds(2),
+                    rolling_dps: 460.0,
+                    ..TimelinePoint::default()
+                },
+            ],
+            ..EngineSnapshot::default()
+        };
+        let settings = VrOverlaySettings {
+            show_status: false,
+            show_encounter: false,
+            show_phase: false,
+            show_boss_number: false,
+            show_focus: false,
+            show_total_damage: false,
+            show_incoming: false,
+            show_recent_hits: false,
+            ..VrOverlaySettings::default()
+        };
+        let mut renderer = HudRenderer::new().expect("Windows includes Segoe UI");
+        let frame = renderer.render(&snapshot, &settings);
+
+        let cyan_graph_pixels = (200..354)
+            .flat_map(|y| (39..319).map(move |x| (y * HUD_TEXTURE_WIDTH + x) * 4))
+            .filter(|index| frame[*index..*index + 4] == [CYAN.0, CYAN.1, CYAN.2, CYAN.3])
+            .count();
+        assert!(
+            cyan_graph_pixels > 100,
+            "the current-segment timeline should produce an obvious cyan line"
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn run_phase_and_boss_controls_change_the_native_hud() {
         let snapshot = EngineSnapshot {
             run_context: minmaxxer_core::RunContext {
                 progress: Some(0.84),
@@ -2360,10 +3173,6 @@ mod tests {
         settings.show_boss_number = true;
         let boss = renderer.render(&snapshot, &settings).to_vec();
         assert!(changed_pixels_in_context_row(&phase, &boss) > 0);
-
-        settings.show_loadout = true;
-        let unavailable_loadout = renderer.render(&snapshot, &settings);
-        assert_ne!(boss, unavailable_loadout);
     }
 
     #[cfg(target_os = "windows")]
@@ -2475,9 +3284,8 @@ mod tests {
         }
     }
 
-    fn grips(left: bool, right: bool, right_pose_available: bool) -> GripInput {
+    fn right_grip(right: bool, right_pose_available: bool) -> GripInput {
         GripInput {
-            left_grip: Some(left),
             right_grip: Some(right),
             controllers_available: true,
             right_pose_available,
@@ -2486,16 +3294,16 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     fn changed_pixels_in_focus_row(left: &[u8], right: &[u8]) -> usize {
-        (75..110)
-            .flat_map(|y| (620..980).map(move |x| (y * HUD_TEXTURE_WIDTH + x) * 4))
+        (103..141)
+            .flat_map(|y| (24..1000).map(move |x| (y * HUD_TEXTURE_WIDTH + x) * 4))
             .filter(|index| left[*index..*index + 4] != right[*index..*index + 4])
             .count()
     }
 
     #[cfg(target_os = "windows")]
     fn changed_pixels_in_context_row(left: &[u8], right: &[u8]) -> usize {
-        (75..110)
-            .flat_map(|y| (40..610).map(move |x| (y * HUD_TEXTURE_WIDTH + x) * 4))
+        (72..104)
+            .flat_map(|y| (24..1000).map(move |x| (y * HUD_TEXTURE_WIDTH + x) * 4))
             .filter(|index| left[*index..*index + 4] != right[*index..*index + 4])
             .count()
     }

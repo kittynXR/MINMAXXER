@@ -61,6 +61,9 @@ pub struct OverlayProfile {
     pub show_phase: bool,
     pub show_boss_number: bool,
     pub show_focus: bool,
+    pub show_graph: bool,
+    pub show_survival: bool,
+    pub show_telemetry: bool,
     pub show_loadout: bool,
     pub anonymize_players: bool,
 }
@@ -70,10 +73,10 @@ impl Default for OverlayProfile {
         Self {
             id: "broadcast".to_owned(),
             name: "Broadcast HUD".to_owned(),
-            layout: "leaderboard".to_owned(),
+            layout: "landscape".to_owned(),
             theme: "void".to_owned(),
             accent: "cyan".to_owned(),
-            background: "rgba(8, 12, 24, 0.82)".to_owned(),
+            background: "rgba(5, 7, 11, 0.94)".to_owned(),
             rows: 8,
             scale: 1.0,
             show_dps: true,
@@ -86,6 +89,9 @@ impl Default for OverlayProfile {
             show_phase: true,
             show_boss_number: true,
             show_focus: true,
+            show_graph: true,
+            show_survival: true,
+            show_telemetry: true,
             show_loadout: false,
             anonymize_players: false,
         }
@@ -192,6 +198,14 @@ impl AppConfig {
     fn normalize_overlay_profiles(&mut self) -> bool {
         let mut changed = false;
         for profile in &mut self.overlay_profiles {
+            if !matches!(profile.layout.as_str(), "portrait" | "landscape") {
+                profile.layout = if profile.layout == "hits" {
+                    "portrait".to_owned()
+                } else {
+                    "landscape".to_owned()
+                };
+                changed = true;
+            }
             if !matches!(profile.theme.as_str(), "void" | "glass") {
                 profile.theme = "void".to_owned();
                 changed = true;
@@ -237,6 +251,12 @@ impl AppConfig {
             anyhow::bail!("VR overlay placement or row settings are outside supported ranges");
         }
         for profile in &self.overlay_profiles {
+            if !matches!(profile.layout.as_str(), "portrait" | "landscape") {
+                anyhow::bail!(
+                    "overlay profile `{}` has an invalid orientation",
+                    profile.id
+                );
+            }
             if !matches!(profile.theme.as_str(), "void" | "glass") {
                 anyhow::bail!(
                     "overlay profile `{}` requests an unsupported theme; MINMAXXER is dark-only",
@@ -305,6 +325,9 @@ mod tests {
 
         assert!(profile.show_phase);
         assert!(profile.show_boss_number);
+        assert!(profile.show_graph);
+        assert!(profile.show_survival);
+        assert!(profile.show_telemetry);
         assert!(!profile.show_loadout);
     }
 
@@ -351,6 +374,20 @@ mod tests {
 
         assert!(config.normalize_overlay_profiles());
         assert_eq!(config.overlay_profiles[0].accent, "mint");
+        assert!(!config.normalize_overlay_profiles());
+    }
+
+    #[test]
+    fn legacy_overlay_layouts_migrate_to_stream_orientations() {
+        let mut config = AppConfig::default();
+        config.overlay_profiles[0].layout = "hits".to_owned();
+
+        assert!(config.normalize_overlay_profiles());
+        assert_eq!(config.overlay_profiles[0].layout, "portrait");
+
+        config.overlay_profiles[0].layout = "leaderboard".to_owned();
+        assert!(config.normalize_overlay_profiles());
+        assert_eq!(config.overlay_profiles[0].layout, "landscape");
         assert!(!config.normalize_overlay_profiles());
     }
 }

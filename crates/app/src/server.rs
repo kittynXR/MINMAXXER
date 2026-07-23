@@ -501,7 +501,7 @@ fn apply_compatibility_aliases(base: &mut Value, patch: &Value) {
                         .get("schema_version")
                         .or_else(|| object.get("ui"))
                         .and_then(Value::as_u64)
-                        != Some(2)
+                        != Some(3)
                         && has("encounter");
                     profile["show_dps"] = Value::Bool(has("dps"));
                     profile["show_damage"] = Value::Bool(has("damage"));
@@ -512,6 +512,9 @@ fn apply_compatibility_aliases(base: &mut Value, patch: &Value) {
                     profile["show_phase"] = Value::Bool(has("phase") || legacy_run_context);
                     profile["show_boss_number"] = Value::Bool(has("boss") || legacy_run_context);
                     profile["show_focus"] = Value::Bool(has("focus"));
+                    profile["show_graph"] = Value::Bool(has("graph"));
+                    profile["show_survival"] = Value::Bool(has("survival"));
+                    profile["show_telemetry"] = Value::Bool(has("telemetry"));
                     profile["show_loadout"] = Value::Bool(has("loadout"));
                 }
             }
@@ -544,7 +547,7 @@ fn apply_compatibility_aliases(base: &mut Value, patch: &Value) {
                     .get("schema_version")
                     .or_else(|| object.get("ui"))
                     .and_then(Value::as_u64)
-                    != Some(2)
+                    != Some(3)
                     && has("encounter");
                 let shows_outgoing_metric = has("dps") || has("damage");
                 let shows_player_metric = shows_outgoing_metric || has("incoming");
@@ -897,7 +900,7 @@ mod tests {
             .expect("VR status rendering should follow the URL builder");
         let url_builder = &APP_JS[url_start..url_end];
 
-        assert!(APP_JS.contains("const OVERLAY_SETTINGS_VERSION = 2"));
+        assert!(APP_JS.contains("const OVERLAY_SETTINGS_VERSION = 3"));
         assert!(url_builder.contains("params.set(\"ui\", OVERLAY_SETTINGS_VERSION)"));
         assert!(options_parser.contains("params.get(\"ui\") !== String(OVERLAY_SETTINGS_VERSION)"));
         assert!(options_parser.contains("params.has(\"show\")"));
@@ -928,9 +931,10 @@ mod tests {
         assert!(options_parser.contains("const hasShow = params.has(\"show\")"));
         assert!(options_parser.contains("const parsedShow = hasShow ? showRaw.split"));
         assert!(!renderer.contains("metrics.push(\"dps\")"));
-        assert!(renderer.contains("const primaryMetric = metrics[0] || null"));
-        assert!(renderer.contains("const totalsWidget = totals.length"));
-        assert!(renderer.contains("const rosterWidget = primaryMetric"));
+        assert!(renderer.contains("LAST 5 LOCAL DAMAGE EVENTS"));
+        assert!(renderer.contains("SURVIVAL FEED"));
+        assert!(renderer.contains("dpsGraphMarkup(live, scope)"));
+        assert!(renderer.contains("HP REMAINING"));
     }
 
     #[test]
@@ -963,7 +967,7 @@ mod tests {
         assert_eq!(legacy["vr_overlay"]["show_boss_number"], true);
         assert_eq!(legacy["vr_overlay"]["show_loadout"], false);
 
-        let explicit = apply(Some(2), vec!["encounter"]);
+        let explicit = apply(Some(3), vec!["encounter"]);
         assert_eq!(profile(&explicit)["show_phase"], false);
         assert_eq!(profile(&explicit)["show_boss_number"], false);
         assert_eq!(profile(&explicit)["show_loadout"], false);
@@ -971,7 +975,7 @@ mod tests {
         assert_eq!(explicit["vr_overlay"]["show_boss_number"], false);
         assert_eq!(explicit["vr_overlay"]["show_loadout"], false);
 
-        let loadout = apply(Some(2), vec!["encounter", "phase", "boss", "loadout"]);
+        let loadout = apply(Some(3), vec!["encounter", "phase", "boss", "loadout"]);
         assert_eq!(profile(&loadout)["show_phase"], true);
         assert_eq!(profile(&loadout)["show_boss_number"], true);
         assert_eq!(profile(&loadout)["show_loadout"], true);
@@ -979,7 +983,7 @@ mod tests {
         assert_eq!(loadout["vr_overlay"]["show_boss_number"], true);
         assert_eq!(loadout["vr_overlay"]["show_loadout"], true);
 
-        let context_only = apply(Some(2), vec!["phase", "boss", "hits", "focus"]);
+        let context_only = apply(Some(3), vec!["phase", "boss", "hits", "focus"]);
         assert_eq!(profile(&context_only)["show_dps"], false);
         assert_eq!(profile(&context_only)["show_damage"], false);
         assert_eq!(context_only["vr_overlay"]["show_players"], false);
@@ -987,7 +991,7 @@ mod tests {
         assert_eq!(context_only["vr_overlay"]["show_rolling_dps"], false);
         assert_eq!(context_only["vr_overlay"]["show_total_damage"], false);
 
-        let incoming_only = apply(Some(2), vec!["incoming"]);
+        let incoming_only = apply(Some(3), vec!["incoming"]);
         assert_eq!(incoming_only["vr_overlay"]["show_incoming"], true);
         assert_eq!(incoming_only["vr_overlay"]["show_players"], true);
         assert_eq!(incoming_only["vr_overlay"]["show_attacks"], false);
@@ -1001,7 +1005,7 @@ mod tests {
         let patch = json!({
             "overlay": {
                 "profile": "minimal",
-                "layout": "compact",
+                "layout": "landscape",
                 "theme": "glass",
                 "accent": "mint",
                 "rows": 3,
@@ -1015,7 +1019,7 @@ mod tests {
 
         assert_eq!(base["desktop_overlay"]["profile"], "minimal");
         assert_eq!(base["desktop_overlay"]["opacity"], 0.42);
-        assert!((base["vr_overlay"]["opacity"].as_f64().unwrap() - 0.92).abs() < 0.0001);
+        assert!((base["vr_overlay"]["opacity"].as_f64().unwrap() - 1.0).abs() < 0.0001);
         assert_eq!(base["vr_overlay"]["rows"], 3);
         assert_eq!(base["vr_overlay"]["recent_hit_rows"], 2);
         let profile = base["overlay_profiles"]
@@ -1024,7 +1028,7 @@ mod tests {
             .iter()
             .find(|profile| profile["id"] == "minimal")
             .unwrap();
-        assert_eq!(profile["layout"], "compact");
+        assert_eq!(profile["layout"], "landscape");
         assert_eq!(profile["theme"], "glass");
         assert_eq!(profile["accent"], "mint");
         assert_eq!(profile["scale"], 1.15);

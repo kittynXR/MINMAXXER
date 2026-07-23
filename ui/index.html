@@ -250,47 +250,47 @@
               <article class="panel control-section">
                 <header><span class="step-index">01</span><div><h2>Choose a profile</h2><p>Profiles save display preferences, not combat data.</p></div></header>
                 <div class="profile-grid" id="profileGrid">
-                  <button class="profile-card active" data-profile="broadcast"><i class="profile-preview broadcast-preview"></i><strong>Broadcast</strong><small>Detailed observed-player table</small></button>
-                  <button class="profile-card" data-profile="minimal"><i class="profile-preview minimal-preview"></i><strong>Minimal</strong><small>Numbers only</small></button>
-                  <button class="profile-card" data-profile="vr"><i class="profile-preview vr-preview"></i><strong>VR glance</strong><small>Large & readable</small></button>
+                  <button class="profile-card active" data-profile="broadcast"><i class="profile-preview broadcast-preview"></i><strong>Broadcast</strong><small>Dense graph + two combat feeds</small></button>
+                  <button class="profile-card" data-profile="minimal"><i class="profile-preview minimal-preview"></i><strong>Minimal</strong><small>Same readable type, fewer sections</small></button>
+                  <button class="profile-card" data-profile="vr"><i class="profile-preview vr-preview"></i><strong>VR glance</strong><small>Target-first and controller movable</small></button>
                 </div>
               </article>
 
               <article class="panel control-section">
                 <header><span class="step-index">02</span><div><h2>Style & content</h2><p>Changes are reflected in the preview immediately.</p></div></header>
                 <div class="control-grid">
-                  <label><span>Layout</span><select id="overlayLayout"><option value="leaderboard">Leaderboard</option><option value="compact">Compact rows</option><option value="ticker">Horizontal ticker</option><option value="hits">Ultra-compact hits</option></select></label>
+                  <label><span>Orientation</span><select id="overlayLayout"><option value="landscape">Landscape · 1280 × 720</option><option value="portrait">Portrait · 720 × 1280</option></select></label>
                   <label><span>Theme</span><select id="overlayTheme"><option value="void">OLED void</option><option value="glass">Dark glass</option></select></label>
                   <label><span>Rows <output id="overlayRowsValue">5</output></span><input type="range" id="overlayRows" min="1" max="8" value="5"></label>
-                  <label><span>Hit rows <output id="overlayHitRowsValue">4</output></span><input type="range" id="overlayHitRows" min="1" max="8" value="4"></label>
+                  <label><span>Hit rows <output id="overlayHitRowsValue">5</output></span><input type="range" id="overlayHitRows" min="1" max="8" value="5"></label>
                   <label><span>Scale <output id="overlayScaleValue">100%</output></span><input type="range" id="overlayScale" min="70" max="160" step="5" value="100"></label>
                   <fieldset><legend>Accent</legend><div class="color-options" id="accentOptions"><button class="active" data-accent="cyan" style="--swatch:#54e6ff" aria-label="Cyan"></button><button data-accent="mint" style="--swatch:#65f2b8" aria-label="Mint"></button><button data-accent="violet" style="--swatch:#ad8cff" aria-label="Violet"></button><button data-accent="amber" style="--swatch:#ffc45c" aria-label="Amber"></button><button data-accent="rose" style="--swatch:#ff719a" aria-label="Rose"></button></div></fieldset>
-                  <label class="bg-control"><span>Background <output id="overlayBgValue">78%</output></span><input type="range" id="overlayBg" min="0" max="100" value="78"></label>
+                  <label class="bg-control"><span>Background <output id="overlayBgValue">94%</output></span><input type="range" id="overlayBg" min="0" max="100" value="94"></label>
                 </div>
-                <fieldset class="show-options"><legend>Visible data</legend><label><input type="checkbox" value="dps" checked><span></span>Boss DPS</label><label><input type="checkbox" value="damage" checked><span></span>Boss damage</label><label><input type="checkbox" value="incoming"><span></span>Incoming</label><label><input type="checkbox" value="encounter" checked><span></span>Encounter</label><label><input type="checkbox" value="phase" checked><span></span>Run phase</label><label><input type="checkbox" value="boss" checked><span></span>Boss #</label><label><input type="checkbox" value="hits" checked><span></span>Recent hits</label><label><input type="checkbox" value="focus" checked><span></span>Boss target?</label><label title="The audited Ecliptica log does not expose shop item names or stack counts, so this cannot be enabled automatically."><input type="checkbox" value="loadout" disabled><span></span>Loadout unavailable (not logged)</label></fieldset>
+                <fieldset class="show-options"><legend>Visible data</legend><label><input type="checkbox" value="dps" checked><span></span>Current DPS</label><label><input type="checkbox" value="damage" checked><span></span>Damage total</label><label><input type="checkbox" value="graph" checked><span></span>DPS graph</label><label><input type="checkbox" value="incoming" checked><span></span>Damage taken</label><label><input type="checkbox" value="survival" checked><span></span>Survival feed</label><label><input type="checkbox" value="encounter" checked><span></span>Stage & boss</label><label><input type="checkbox" value="phase" checked><span></span>Run phase</label><label><input type="checkbox" value="boss" checked><span></span>Round #</label><label><input type="checkbox" value="hits" checked><span></span>Last 5 damage events</label><label><input type="checkbox" value="focus" checked><span></span>Boss target?</label><label><input type="checkbox" value="telemetry" checked><span></span>HP / healing / gems / song</label><label title="The audited Ecliptica log does not expose shop item names or stack counts."><input type="checkbox" value="loadout" disabled><span></span>Loadout unavailable (not logged)</label></fieldset>
               </article>
 
               <article class="panel control-section output-section">
                 <header><span class="step-index">03</span><div><h2>Send it somewhere</h2><p>OBS uses the selected layout; native outputs adapt it to their fixed HUD surfaces.</p></div></header>
                 <div class="output-cards">
-                  <div class="output-card obs-card"><div class="output-icon">OBS</div><div><strong>OBS browser source</strong><small>Transparent web output · recommended 720 × 480</small></div><span class="ready-pill">READY</span></div>
+                  <div class="output-card obs-card"><div class="output-icon">OBS</div><div><strong>OBS browser source</strong><small id="obsResolutionHint">Landscape · set the Browser Source to 1280 × 720</small></div><span class="ready-pill">READY</span></div>
                   <div class="url-copy"><input id="obsUrl" readonly aria-label="OBS browser source URL"><button id="copyObsUrl">Copy for OBS</button></div>
                   <p class="obs-paste-hint"><strong>In OBS:</strong> click the URL field, press <kbd>Ctrl+A</kbd>, then paste. Replace the entire default <code>https://obsproject.com/browser-source</code> address.</p>
                   <div class="output-card"><div class="output-icon desktop-icon">▣</div><div><strong>Desktop overlay</strong><small>Auto-fit compact HUD at 100% · up to 2 players and 2 hits (1 player when the limitation panel is forced by config)</small></div><button class="switch" id="desktopOverlayToggle" role="switch" aria-checked="false"><i></i></button></div>
                   <div class="grab-control"><div><strong>Show desktop HUD with a detected headset</strong><small>Enable this if a connected but idle headset would otherwise hide the desktop overlay.</small></div><button class="switch" id="desktopHeadsetToggle" type="button" role="switch" aria-checked="false" aria-label="Show desktop overlay when a headset is detected"><i></i></button></div>
                   <div class="output-card"><div class="output-icon vr-icon">VR</div><div><strong>VR overlay</strong><small id="vrOverlayStatus">OpenVR panel with saved coordinates or optional controller placement</small></div><button class="switch" id="vrOverlayToggle" role="switch" aria-checked="false"><i></i></button></div>
                   <div class="vr-placement" id="vrPlacementControls">
-                    <div class="placement-heading"><div><strong>VR placement</strong><small>Head-relative metres · saved immediately when applied</small></div><span>POSITION</span></div>
+                    <div class="placement-heading"><div><strong>VR placement</strong><small>Use Grab & move for normal placement; coordinates remain available for exact setup.</small></div><span>POSITION</span></div>
                     <div class="placement-grid">
                       <label><span>X</span><input id="vrX" type="number" min="-3" max="3" step="0.01" value="0.30"></label>
                       <label><span>Y</span><input id="vrY" type="number" min="-3" max="3" step="0.01" value="0.08"></label>
                       <label><span>Z</span><input id="vrZ" type="number" min="-5" max="-0.1" step="0.01" value="-1.05"></label>
-                      <label><span>Width m</span><input id="vrWidth" type="number" min="0.2" max="3" step="0.01" value="0.78"></label>
-                      <label><span>Opacity</span><input id="vrOpacity" type="number" min="0.1" max="1" step="0.01" value="0.92"></label>
+                      <label><span>Width m</span><input id="vrWidth" type="number" min="0.2" max="3" step="0.01" value="0.86"></label>
+                      <label><span>Opacity</span><input id="vrOpacity" type="number" min="0.1" max="1" step="0.01" value="1.00"></label>
                     </div>
                     <div class="grab-control">
-                      <div><strong>Controller grab placement</strong><small>Hold both grips for 0.9s to attach it to the right controller; release the right grip to freeze it for this VR session. Grabbed placement does not overwrite the saved coordinates above.</small></div>
-                      <button class="switch" id="vrGrabToggle" type="button" role="switch" aria-checked="false" aria-label="Enable VR controller grab placement"><i></i></button>
+                      <div><strong>Grab & move overlay</strong><small>Turn on to unlock. Squeeze the right grip to grab, move naturally, and release to place it. Turn this off when finished to lock the HUD against accidental movement.</small></div>
+                      <button class="switch" id="vrGrabToggle" type="button" role="switch" aria-checked="false" aria-label="Unlock the VR overlay for controller grab and move"><i></i></button>
                     </div>
                     <div class="placement-actions"><small>Negative Z places the panel in front of your view.</small><button class="ghost-button" id="resetVrPlacement" type="button">Reset</button><button class="primary-button" id="saveVrPlacement" type="button">Apply VR settings</button></div>
                   </div>
@@ -298,7 +298,7 @@
               </article>
 
               <aside class="capability-note">
-                <span aria-hidden="true">i</span><p><strong>Honest about the log.</strong> Phase uses a documented third-party progress-band convention over Ecliptica's numeric log value; boss number comes from stage markers. The audited build does not print shop item names or stack counts, so loadout stays unavailable instead of being guessed. “Boss target?” combines boss activity and network-ownership evidence; it is useful for awareness but is not an authoritative hate table.</p>
+                <span aria-hidden="true">i</span><p><strong>Honest about the log.</strong> Both complete 13-round logs expose stage, boss, outgoing amount/category, incoming amount/source, and ownership-based target evidence. They contain no HP, healing, gem, purchase, shop-item, or soundtrack records. Those fields say “not logged” instead of showing a false zero. “Boss target?” remains a useful proxy, not an authoritative hate table.</p>
               </aside>
             </div>
 
@@ -306,7 +306,7 @@
               <div class="preview-toolbar"><span>LIVE OUTPUT PREVIEW</span><div><button id="previewFit" class="active">Fit</button><button id="previewOneToOne">1:1</button></div></div>
               <div class="overlay-stage" id="overlayStage">
                 <div id="studioOverlayPreview" class="embedded-overlay"></div>
-                <span class="stage-size">720 × 480</span>
+                <span class="stage-size">1280 × 720</span>
               </div>
               <div class="preview-hints"><span><i></i> Transparency grid is preview-only</span><span>Keep MINMAXXER running while OBS uses the source</span></div>
             </div>

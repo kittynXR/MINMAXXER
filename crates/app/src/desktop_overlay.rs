@@ -140,14 +140,9 @@ fn overlay_url(origin: &Url, runtime: &DesktopOverlayRuntimeConfig) -> Url {
         "broadcast" | "minimal" | "vr" => profile.id.as_str(),
         _ => "broadcast",
     };
-    // The click-through desktop surface has a fixed viewport and cannot scroll. Preserve the
-    // dedicated hit-feed choice, but normalize table/ticker choices to a compact composition so
-    // phase, boss, target, players, and recent hits all remain visible at the 520x300 default.
-    let layout = if profile.layout == "hits" {
-        "hits"
-    } else {
-        "compact"
-    };
+    // The click-through desktop surface uses the same dense composition as OBS, then applies
+    // desktop-specific clipping rules in CSS so it still fits its small fixed viewport.
+    let layout = profile.layout.as_str();
     let theme = match profile.theme.as_str() {
         "void" | "glass" => profile.theme.as_str(),
         _ => "void",
@@ -182,6 +177,15 @@ fn overlay_url(origin: &Url, runtime: &DesktopOverlayRuntimeConfig) -> Url {
     if profile.show_focus {
         show.push("focus");
     }
+    if profile.show_graph {
+        show.push("graph");
+    }
+    if profile.show_survival {
+        show.push("survival");
+    }
+    if profile.show_telemetry {
+        show.push("telemetry");
+    }
     if profile.show_loadout {
         show.push("loadout");
     }
@@ -191,7 +195,7 @@ fn overlay_url(origin: &Url, runtime: &DesktopOverlayRuntimeConfig) -> Url {
     url.set_query(None);
     url.query_pairs_mut()
         .append_pair("surface", "desktop")
-        .append_pair("ui", "2")
+        .append_pair("ui", "3")
         .append_pair("profile", renderer_profile)
         .append_pair("layout", layout)
         .append_pair("theme", theme)
@@ -310,9 +314,9 @@ mod tests {
         let url = overlay_url(&Url::parse("http://127.0.0.1:49321").unwrap(), &runtime);
         let query: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
         let show: std::collections::HashSet<_> = query.get("show").unwrap().split(',').collect();
-        assert_eq!(query.get("ui").map(String::as_str), Some("2"));
+        assert_eq!(query.get("ui").map(String::as_str), Some("3"));
         assert_eq!(query.get("profile").map(String::as_str), Some("broadcast"));
-        assert_eq!(query.get("layout").map(String::as_str), Some("compact"));
+        assert_eq!(query.get("layout").map(String::as_str), Some("landscape"));
         assert_eq!(query.get("rows").map(String::as_str), Some("2"));
         assert_eq!(query.get("hit_rows").map(String::as_str), Some("2"));
         assert_eq!(query.get("scale").map(String::as_str), Some("100"));
@@ -321,6 +325,9 @@ mod tests {
         assert!(show.contains("phase"));
         assert!(show.contains("boss"));
         assert!(show.contains("focus"));
+        assert!(show.contains("graph"));
+        assert!(show.contains("survival"));
+        assert!(show.contains("telemetry"));
         assert!(!show.contains("loadout"));
     }
 

@@ -28,10 +28,15 @@ VRChat output_log_*.txt
 - Live clients share a Tokio watch channel, so only the newest snapshot is retained.
 - Exact-boss ownership lines also enter a discrete, non-coalescing alert channel after their
   storage batch succeeds. Startup, rescan, rotation, and recovery replays contribute only a silent
-  final-state baseline before newly appended edges. A dormant async task plays one embedded PCM
-  WAV through WinMM only on a fresh transition onto the local player. It adds no decoder, audio
+  final-state baseline before newly appended edges. A dormant async task plays one of two embedded
+  PCM WAV cues through WinMM only on a fresh transition onto the local player, or on a later live
+  exact-boss ownership transfer from that player to another known player in the same encounter.
+  Identity corrections, expiry, and encounter boundaries stay silent. It adds no decoder, audio
   engine, polling loop, or browser-audio surface.
 - OBS and desktop overlays reuse the same loopback HTML/CSS/JavaScript assets.
+- Live outgoing hits use a dedicated bounded phase queue rather than the mixed diagnostic-event
+  queue. The rows persist through idle gaps, age in place, dim after ten seconds without a hit,
+  and clear only on a genuine encounter boundary.
 - The VR overlay avoids a second browser process. It rasterizes a dense HUD with `fontdue`, reuses a 1024 × 512 RGBA allocation, redraws only on changes, and caps OpenVR uploads at 4 Hz. Width, opacity, curvature, and transform writes are cached separately so a texture redraw does not reconfigure the compositor.
 - SteamVR is not initialized until the VR output is enabled.
 

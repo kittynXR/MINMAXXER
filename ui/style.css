@@ -264,6 +264,8 @@ input { min-height: 36px; padding: 0 11px; }
 .feed-copy b { color:#dce6ef; font-weight:600; }
 .feed-amount { color:var(--event-color); font-family:"Cascadia Code",monospace; font-size:8px; }
 .hit-feed-row.newest { animation:hit-flash .64s ease-out; }
+.event-feed .hit-feed-row,.analytics-hit-panel tbody{transition:opacity .28s ease,color .28s ease}
+.event-feed.inactive .hit-feed-row,.analytics-hit-panel.inactive tbody{opacity:.54}
 @keyframes hit-flash { 0% { background:rgba(var(--cyan-rgb),.2); box-shadow:inset 2px 0 var(--cyan); } 100% { background:transparent; box-shadow:inset 2px 0 transparent; } }
 
 .page-heading { min-height:76px; display:flex; align-items:flex-start; justify-content:space-between; gap:20px; padding:5px 2px 15px; }
@@ -599,12 +601,16 @@ body[data-overlay="true"] .overlay-root, body[data-forced-overlay="true"] .overl
   border-radius:11px;
 }
 .overlay-graph>header{height:58px;display:flex;align-items:center;justify-content:space-between;padding:8px 14px}
+.overlay-graph-stats{min-width:0;display:flex;align-items:flex-end;gap:22px}
+.overlay-graph-stats>div{min-width:0}
 .overlay-graph>header span{display:block;color:#9eabb9;font-size:13px;font-weight:900;letter-spacing:.08em}
 .overlay-graph>header strong{display:block;margin-top:2px;color:var(--overlay-accent);font-family:"Cascadia Code","Consolas",monospace;font-size:27px;font-weight:900;line-height:1}
 .overlay-graph>header strong small{font-size:13px}
+.overlay-graph>header .phase-average strong{color:#c5a8ff;font-size:23px}
 .overlay-graph>header em{color:#7f8d9c;font-family:"Cascadia Code","Consolas",monospace;font-size:13px;font-style:normal;font-weight:750}
 .overlay-graph svg{position:absolute;inset:61px 12px 10px;width:calc(100% - 24px);height:calc(100% - 71px);overflow:visible}
 .overlay-graph svg line{stroke:rgba(155,180,207,.12);stroke-width:1}
+.overlay-graph svg line.phase-average-line{stroke:#ad8cff;stroke-width:2;stroke-dasharray:8 6;vector-effect:non-scaling-stroke}
 .overlay-graph svg polygon{fill:rgba(var(--overlay-accent-rgb),.12)}
 .overlay-graph svg polyline{fill:none;stroke:var(--overlay-accent);stroke-width:4;stroke-linecap:round;stroke-linejoin:round;vector-effect:non-scaling-stroke;filter:drop-shadow(0 0 5px rgba(var(--overlay-accent-rgb),.48))}
 .overlay-graph-empty{position:absolute;inset:58px 0 0;display:grid;place-items:center;color:#7e8c9b;font-size:15px}
@@ -630,6 +636,9 @@ body[data-overlay="true"] .overlay-root, body[data-forced-overlay="true"] .overl
 .overlay-feed-row{min-height:34px;display:grid;grid-template-columns:43px minmax(0,1fr) 88px 88px;gap:8px;align-items:center;padding:3px 11px;border-top:1px solid rgba(155,180,207,.09)}
 .overlay-feed-row:nth-child(odd){background:rgba(255,255,255,.012)}
 .overlay-feed-row.newest{animation:overlay-hit-flash .65s ease-out}
+.overlay-hit-widget .overlay-feed-row{transition:opacity .28s ease,color .28s ease}
+.overlay-hit-widget.inactive .overlay-feed-row{opacity:.54}
+.overlay-hit-widget.inactive>header small{color:#ad8cff}
 .overlay-feed-row .hit-age{color:#7d8c9b;font-family:"Cascadia Code","Consolas",monospace;font-size:13px;font-weight:750}
 .feed-name{min-width:0}
 .feed-name strong,.feed-name small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}

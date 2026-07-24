@@ -9,15 +9,15 @@ All application and HUD surfaces are dark-only. The Windows title bar, WebView p
 ## What it reports
 
 - Exact outgoing hit values for the player whose log is being watched, split into strike and non-strike damage.
-- A configurable, newest-first recent-hit feed for classes whose damage numbers are obscured by movement or VFX.
+- A configurable, newest-first phase-hit feed for classes whose damage numbers are obscured by movement or VFX. The last hits remain until the current phase boundary and dim after inactivity instead of disappearing.
 - Boss-window, encounter, rolling 5/15/30-second, stage, and run damage statistics. When boss telemetry exists, the primary historical DPS and totals cover boss fights only; pre-boss time and damage are reported separately.
 - Incoming damage totals, largest hit, and breakdown by the raw attack/source label present in the log.
-- Dense stream/VR HUDs with prominent MINMAXXER branding, a current-segment DPS graph, the last five local damage events, and a separate incoming-damage feed.
+- Dense stream/VR HUDs with prominent MINMAXXER branding, a current-segment rolling DPS graph plus full-phase average, the last five local damage events, and a separate incoming-damage feed.
 - Stage, class, boss/phase, session, roster, encounter timing, and raw event history.
 - Live run context with the PRIME/PENUMBRA/ANTUMBRA/UMBRA/ECLIPSE band and the current 1-based boss ordinal. Mid-run ordinal recovery is visibly marked as inferred.
 - Multi-player post-run reports after logs from the other players are imported. Matching Ecliptica session IDs are merged automatically.
 - An always-visible experimental `BOSS TARGET?` signal based on exact boss-entity VRChat network ownership, with confidence, evidence, and signal age. A matching incoming hit can corroborate the proxy, and the last candidate remains visible until the encounter boundary. Network ownership is **not** an authoritative hate table.
-- A native one-shot warning when a fresh `BOSS TARGET?` signal switches to the local player. The alert is enabled by default, has a short anti-chatter cooldown, works while minimized and in headless mode, and can be disabled in Settings.
+- Native audio cues when a fresh `BOSS TARGET?` signal switches to the local player and when a later live ownership transfer moves that same boss to another known player. The urgent warning and softer all-clear are enabled together by default, have independent anti-chatter cooldowns, work while minimized and in headless mode, and can be disabled in Settings.
 
 Ecliptica directly logs a numeric run-progress value, but not the named difficulty band. MINMAXXER maps it with the documented, unofficial [EACT five-band convention](https://eact-doc.rtail.dev/?lang=en#phases): `0.0–<0.2` PRIME, `0.2–<0.4` PENUMBRA, `0.4–<0.6` ANTUMBRA, `0.6–<0.8` UMBRA, and `0.8–1.0` ECLIPSE. The half-open endpoint handling is MINMAXXER's convention, not an official world API contract. At progress `1.0`, a matching final Bringer-stage marker is presented as **EYE OF THE ECLIPSE**, corroborated by the community [boss reference](https://wikiwiki.jp/ecliptica/%E3%83%9C%E3%82%B9), while retaining the ECLIPSE numeric band. Boss ordinals counted from a run observed at progress zero are exact, as is boss 13 when the final Bringer marker identifies it; other mid-run recovery uses audited progress anchors and labels the estimate `INFERRED`/`~`.
 
@@ -31,7 +31,7 @@ Ecliptica's current logs do **not** expose other players' damage to one client, 
 
 The portable release executable statically links the Visual C++ runtime. Its only desktop UI prerequisite is the Microsoft Edge WebView2 runtime included with current Windows 10/11 installations. SteamVR is only initialized when its overlay is enabled. Published builds are currently unsigned, so Windows SmartScreen may ask for confirmation on first launch.
 
-The embedded boss-target warning is Kenney's CC0 `error_006` interface sound, converted to a small PCM WAV for native Windows playback. See [Third-party notices](THIRD_PARTY_NOTICES.md) for its source and license.
+The embedded boss-target warning and all-clear are Kenney's CC0 `error_006` and `confirmation_001` interface sounds, converted to small PCM WAV files for native Windows playback. See [Third-party notices](THIRD_PARTY_NOTICES.md) for their source and license.
 
 ### OBS
 
@@ -87,6 +87,6 @@ cargo build --release -p minmaxxer
 ./scripts/build-portable.ps1
 ```
 
-The normal executable is written to `target\release\minmaxxer.exe`. The portable release script uses a clean isolated target, statically links the MSVC runtime, strips local build paths, and writes `dist\MINMAXXER-v0.4.2-windows-x64.exe`. Run the local server without the desktop WebView with `minmaxxer.exe --headless`.
+The normal executable is written to `target\release\minmaxxer.exe`. The portable release script uses a clean isolated target, statically links the MSVC runtime, strips local build paths, and writes `dist\MINMAXXER-v0.4.3-windows-x64.exe`. Run the local server without the desktop WebView with `minmaxxer.exe --headless`.
 
 The code is split into a dependency-light parser/analytics crate and a Windows app crate. More detail is in [Architecture](docs/ARCHITECTURE.md).

@@ -1,9 +1,11 @@
 # Third-party notices
 
-## Boss-target alert sound
+## Boss-target audio cues
 
-- Asset: `crates/app/assets/boss-target-alert.wav`
-- Source file: `error_006.ogg` from **Interface Sounds 1.0**
+- Assets:
+  - `crates/app/assets/boss-target-alert.wav` from `error_006.ogg`
+  - `crates/app/assets/boss-target-released.wav` from `confirmation_001.ogg`
+- Source pack: **Interface Sounds 1.0**
 - Creator/distributor: Kenney
 - Source: https://kenney.nl/assets/interface-sounds
 - License: Creative Commons Zero 1.0 Universal (CC0)

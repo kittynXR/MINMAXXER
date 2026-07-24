@@ -89,6 +89,7 @@ fn target_event(source_file: &str, observation: BossTargetObservation) -> BossTa
         target_player: observation.focus.player,
         observed_player: observation.observed_player,
         observed_at: observation.focus.observed_at,
+        cause: observation.cause,
     }
 }
 
@@ -863,6 +864,7 @@ fn modified_millis(metadata: &std::fs::Metadata) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use minmaxxer_core::BossTargetObservationCause;
 
     fn temporary_storage(label: &str) -> (Storage, PathBuf) {
         let path = std::env::temp_dir().join(format!(
@@ -994,6 +996,7 @@ mod tests {
             panic!("expected a retained-target baseline");
         };
         assert_eq!(baseline.target_player, "Other Player");
+        assert_eq!(baseline.cause, BossTargetObservationCause::Baseline);
 
         let live = concat!(
             "2026.07.23 20:00:04 Debug      -  ownership of Astral-Sovereign transferred to Local Player\n",
@@ -1022,6 +1025,7 @@ mod tests {
             let BossTargetUpdate::Live(event) = update else {
                 panic!("normal append should emit live target events");
             };
+            assert_eq!(event.cause, BossTargetObservationCause::OwnershipTransfer);
             targets.push((event.target_player, event.encounter_name));
         }
         assert_eq!(
@@ -1084,6 +1088,7 @@ mod tests {
         };
         assert_eq!(observation.target_player, "Late Local");
         assert_eq!(observation.observed_player.as_deref(), Some("Late Local"));
+        assert_eq!(observation.cause, BossTargetObservationCause::LocalIdentity);
         assert!(receiver.try_recv().is_err());
 
         let stale_identity =

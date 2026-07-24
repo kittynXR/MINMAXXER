@@ -850,9 +850,10 @@ mod tests {
     }
 
     #[test]
-    fn settings_ui_wires_the_native_boss_target_alert_toggle() {
+    fn settings_ui_wires_the_native_boss_target_audio_cue_toggle() {
         assert!(INDEX_HTML.contains("id=\"bossTargetAlertToggle\""));
-        assert!(INDEX_HTML.contains("Boss-target sound alert"));
+        assert!(INDEX_HTML.contains("Boss-target audio cues"));
+        assert!(INDEX_HTML.contains("softer all-clear"));
         assert!(APP_JS.contains("state.settings.boss_target_alert_enabled ?? true"));
         assert!(APP_JS.contains(
             "boss_target_alert_enabled: $(\"#bossTargetAlertToggle\").getAttribute(\"aria-checked\") === \"true\""
@@ -860,6 +861,17 @@ mod tests {
         assert!(APP_JS.contains(
             "\"#autoImportToggle\", \"#bossTargetAlertToggle\", \"#launchMinimizedToggle\""
         ));
+    }
+
+    #[test]
+    fn live_huds_label_phase_average_and_dim_persistent_idle_hits() {
+        assert!(APP_JS.contains("const HIT_FEED_IDLE_SECONDS = 10"));
+        assert!(APP_JS.contains("<span>PHASE AVG</span>"));
+        assert!(APP_JS.contains("RETAINED FOR PHASE"));
+        assert!(APP_JS.contains("root.classList.toggle(\"inactive\", hitFeedIsInactive(hits))"));
+        assert!(STYLE_CSS.contains(".overlay-graph svg line.phase-average-line"));
+        assert!(STYLE_CSS.contains(".overlay-hit-widget.inactive .overlay-feed-row"));
+        assert!(STYLE_CSS.contains(".event-feed.inactive .hit-feed-row"));
     }
 
     #[test]

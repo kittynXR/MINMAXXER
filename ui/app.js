@@ -19,6 +19,7 @@
   };
   const titles = { live: "LIVE ENCOUNTER", runs: "RUN HISTORY", compare: "COMPARE RUNS", analysis: "DEEP ANALYSIS", events: "EVENT EXPLORER", overlay: "OVERLAY STUDIO" };
   const OVERLAY_SETTINGS_VERSION = 4;
+  const HIT_FEED_IDLE_SECONDS = 10;
 
   const state = {
     live: null,
@@ -848,7 +849,8 @@
       .slice(-120)
       .map((point) => Math.max(0, number(point.total)))
       .filter(Number.isFinite);
-    const maximum = Math.max(...values, 1);
+    const phaseAverage = Math.max(0, number(live.outgoing?.dps));
+    const maximum = Math.max(...values, phaseAverage, 1);
     const width = 680;
     const height = 190;
     const points = values.length
@@ -860,8 +862,9 @@
       : "";
     const area = points ? `0,${height} ${points} ${width},${height}` : "";
     const current = values.at(-1) ?? number(live.outgoing?.rolling5s ?? live.outgoing?.dps);
+    const averageY = height - phaseAverage / maximum * (height - 12) - 6;
     const label = scope.key === "boss" ? "BOSS DPS" : scope.key === "pre-boss" ? "PRE-BOSS DPS · EXCLUDED" : "DPS · WAITING";
-    return `<section class="overlay-graph"><header><div><span>${escapeHtml(label)}</span><strong>${formatCompact(current)} <small>/ SEC</small></strong></div><em>5 SECOND ROLLING · CURRENT SEGMENT</em></header><svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" role="img" aria-label="${escapeHtml(label)} line graph"><line x1="0" y1="${height*.25}" x2="${width}" y2="${height*.25}"></line><line x1="0" y1="${height*.5}" x2="${width}" y2="${height*.5}"></line><line x1="0" y1="${height*.75}" x2="${width}" y2="${height*.75}"></line>${points ? `<polygon points="${area}"></polygon><polyline points="${points}"></polyline>` : ""}</svg>${points ? "" : `<div class="overlay-graph-empty">Waiting for local damage events…</div>`}</section>`;
+    return `<section class="overlay-graph"><header><div class="overlay-graph-stats"><div><span>${escapeHtml(label)} · CURRENT</span><strong>${formatCompact(current)} <small>/ SEC</small></strong></div><div class="phase-average"><span>PHASE AVG</span><strong>${formatCompact(phaseAverage)} <small>/ SEC</small></strong></div></div><em>5 SECOND ROLLING · CURRENT SEGMENT</em></header><svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" role="img" aria-label="${escapeHtml(label)} rolling line graph with phase average"><line x1="0" y1="${height*.25}" x2="${width}" y2="${height*.25}"></line><line x1="0" y1="${height*.5}" x2="${width}" y2="${height*.5}"></line><line x1="0" y1="${height*.75}" x2="${width}" y2="${height*.75}"></line>${phaseAverage > 0 ? `<line class="phase-average-line" x1="0" y1="${averageY.toFixed(1)}" x2="${width}" y2="${averageY.toFixed(1)}"></line>` : ""}${points ? `<polygon points="${area}"></polygon><polyline points="${points}"></polyline>` : ""}</svg>${points ? "" : `<div class="overlay-graph-empty">Waiting for local damage events…</div>`}</section>`;
   }
 
   function renderLive() {
@@ -927,7 +930,7 @@
   function renderTimelineLegend() {
     const root = $("#timelineLegend"); if (!root) return;
     const top = state.usingMock ? [...state.live.players].sort((a, b) => b.dps - a.dps).slice(0, 4) : [];
-    root.innerHTML = `<span><i style="--legend:#eef7ff"></i>${state.usingMock ? "Party total" : "Local total"}</span>${top.map((p) => `<span><i style="--legend:${p.color}"></i>${escapeHtml(p.name)}</span>`).join("")}`;
+    root.innerHTML = `<span><i style="--legend:#eef7ff"></i>${state.usingMock ? "Party rolling 5s" : "Local rolling 5s"}</span><span class="phase-average-legend"><i style="--legend:#ad8cff"></i>Phase avg ${formatCompact(state.live.outgoing.dps)}/s</span>${top.map((p) => `<span><i style="--legend:${p.color}"></i>${escapeHtml(p.name)}</span>`).join("")}`;
   }
 
   function renderEffects() {
@@ -983,11 +986,24 @@
     }).sort((a, b) => a.age - b.age).slice(0, limit);
   }
 
+  function formatHitAge(age) {
+    const seconds = Math.max(0, number(age));
+    if (seconds < 10) return `${seconds.toFixed(1)}s`;
+    if (seconds < 60) return `${Math.round(seconds)}s`;
+    if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
+    return `${Math.floor(seconds / 3600)}h`;
+  }
+
+  function hitFeedIsInactive(hits) {
+    return Boolean(hits.length && hits[0].age >= HIT_FEED_IDLE_SECONDS);
+  }
+
   function renderFeed() {
     const root = $("#eventFeed"); if (!root) return;
     const hits = recentHits(state.live, 7);
     const newestKey = hits[0] ? `${hits[0].id}|${hits[0].amount}|${hits[0].time}` : ""; const changed = Boolean(newestKey && state.feedHitKey !== newestKey); state.feedHitKey = newestKey;
-    root.innerHTML = hits.length ? hits.map((hit, index) => `<div class="feed-event hit-feed-row ${index === 0 && changed ? "newest" : ""}" style="--event-color:${hit.strike ? "var(--cyan)" : "var(--violet)"}"><span class="feed-time">${hit.age < 10 ? `${hit.age.toFixed(1)}s` : `${Math.round(hit.age)}s`}</span><span class="feed-type">${hit.strike ? "S" : "N"}</span><span class="feed-copy"><b>${escapeHtml(state.usingMock ? hit.action : "Local damage event")}</b> · ${hit.strike ? "STRIKE" : "NON-STRIKE"} category</span><span class="feed-amount">${formatCompact(hit.amount)}${hit.flags.includes("CRIT") ? " ✦" : ""}</span></div>`).join("") : `<div class="empty-state"><div><strong>Waiting for outgoing hits</strong><p>The next local damage event written to the log will appear here.</p></div></div>`;
+    root.classList.toggle("inactive", hitFeedIsInactive(hits));
+    root.innerHTML = hits.length ? hits.map((hit, index) => `<div class="feed-event hit-feed-row ${index === 0 && changed ? "newest" : ""}" style="--event-color:${hit.strike ? "var(--cyan)" : "var(--violet)"}"><span class="feed-time">${formatHitAge(hit.age)}</span><span class="feed-type">${hit.strike ? "S" : "N"}</span><span class="feed-copy"><b>${escapeHtml(state.usingMock ? hit.action : "Local damage event")}</b> · ${hit.strike ? "STRIKE" : "NON-STRIKE"} category</span><span class="feed-amount">${formatCompact(hit.amount)}${hit.flags.includes("CRIT") ? " ✦" : ""}</span></div>`).join("") : `<div class="empty-state"><div><strong>Waiting for outgoing hits</strong><p>The next local damage event written to the log will appear here.</p></div></div>`;
   }
 
   function canvasSetup(canvas) {
@@ -1030,12 +1046,16 @@
     let timeline = state.live.timeline;
     const activeRange = $(".chart-range .active")?.dataset.range;
     if (activeRange === "30") timeline = timeline.filter((point) => point.t >= state.live.encounter.duration - 30);
-    const totals = timeline.map((point) => point.total); const max = Math.max(...totals, 1) * 1.12;
+    const totals = timeline.map((point) => point.total); const phaseAverage = Math.max(0, number(state.live.outgoing.dps)); const max = Math.max(...totals, phaseAverage, 1) * 1.12;
     const times = timeline.map((point) => point.t);
     const timeStart = activeRange === "30" ? Math.max(0, state.live.encounter.duration - 30) : 0;
     const timeEnd = Math.max(timeStart + 1, state.live.encounter.duration);
     ctx.clearRect(0, 0, width, height); drawGrid(ctx, width, height, padding, max, false);
     drawSeries(ctx, totals, width, height, padding, max, "#dfeaf4", 1.8, true, times, timeStart, timeEnd);
+    if (phaseAverage > 0) {
+      const innerH = height - padding.top - padding.bottom; const averageY = padding.top + (1 - phaseAverage / max) * innerH;
+      ctx.save(); ctx.setLineDash([6, 4]); ctx.strokeStyle = "#ad8cff"; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.moveTo(padding.left, averageY); ctx.lineTo(width - padding.right, averageY); ctx.stroke(); ctx.restore();
+    }
     if (state.usingMock) {
       const topPlayers = [...state.live.players].sort((a, b) => b.dps - a.dps).slice(0, 4);
       topPlayers.forEach((player) => { const originalIndex = state.live.players.indexOf(player); const values = timeline.map((point) => point.players?.[originalIndex] || 0); drawSeries(ctx, values, width, height, padding, max, player.color, 1, false, times, timeStart, timeEnd); });
@@ -1240,7 +1260,7 @@
 
   function recentHitsAnalysisMarkup() {
     const hits = recentHits(state.live, 8);
-    return `<article class="panel analytics-hit-panel"><header class="panel-header"><div><span class="eyebrow">LIVE HIT MEMORY</span><h2>Previous local outgoing damage events</h2></div><span class="unit-label">DAMAGE CATEGORY ONLY — ABILITY NAME IS NOT LOGGED</span></header>${hits.length ? `<div class="data-table-wrap"><table class="data-table"><thead><tr><th>Age</th><th>Event</th><th>Ability name</th><th>Damage category</th><th class="numeric">Amount</th><th>Flags</th></tr></thead><tbody>${hits.map((hit) => `<tr><td class="rank-cell">${hit.age < 10 ? hit.age.toFixed(1) : Math.round(hit.age)}s</td><td>${escapeHtml(state.usingMock ? hit.action : "Local damage event")}</td><td>${state.usingMock ? escapeHtml(hit.action) : "Not logged"}</td><td><span class="hit-kind ${hit.strike ? "strike" : "non-strike"}">${hit.strike ? "STRIKE" : "NON-STRIKE"}</span></td><td class="numeric">${formatNumber(hit.amount)}</td><td>${hit.flags.filter((flag) => !["STRIKE", "NON-STRIKE"].includes(flag)).map((flag) => `<span class="flag" style="--flag-color:var(--amber)">${escapeHtml(flag)}</span>`).join("") || "—"}</td></tr>`).join("")}</tbody></table></div>` : `<div class="empty-state"><p>No local outgoing damage events are available in the current log window.</p></div>`}</article>`;
+    return `<article class="panel analytics-hit-panel ${hitFeedIsInactive(hits) ? "inactive" : ""}"><header class="panel-header"><div><span class="eyebrow">LIVE PHASE HIT MEMORY</span><h2>Previous local outgoing damage events</h2></div><span class="unit-label">${hitFeedIsInactive(hits) ? `IDLE · LAST HIT ${formatHitAge(hits[0].age)} · RETAINED UNTIL PHASE END` : "DAMAGE CATEGORY ONLY — ABILITY NAME IS NOT LOGGED"}</span></header>${hits.length ? `<div class="data-table-wrap"><table class="data-table"><thead><tr><th>Age</th><th>Event</th><th>Ability name</th><th>Damage category</th><th class="numeric">Amount</th><th>Flags</th></tr></thead><tbody>${hits.map((hit) => `<tr><td class="rank-cell">${formatHitAge(hit.age)}</td><td>${escapeHtml(state.usingMock ? hit.action : "Local damage event")}</td><td>${state.usingMock ? escapeHtml(hit.action) : "Not logged"}</td><td><span class="hit-kind ${hit.strike ? "strike" : "non-strike"}">${hit.strike ? "STRIKE" : "NON-STRIKE"}</span></td><td class="numeric">${formatNumber(hit.amount)}</td><td>${hit.flags.filter((flag) => !["STRIKE", "NON-STRIKE"].includes(flag)).map((flag) => `<span class="flag" style="--flag-color:var(--amber)">${escapeHtml(flag)}</span>`).join("") || "—"}</td></tr>`).join("")}</tbody></table></div>` : `<div class="empty-state"><p>No local outgoing damage events are available in the current phase.</p></div>`}</article>`;
   }
 
   function renderPlayerAnalysis(root, run) {
@@ -1383,6 +1403,7 @@
     const metrics = ["dps", "damage", "incoming"].filter((metric) => options.show.includes(metric));
     const scope = liveCombatScope(live);
     const hits = recentHits(live, Math.min(5, options.hitRows || 5));
+    const hitsInactive = hitFeedIsInactive(hits);
     const survival = recentSurvivalEvents(live, 5);
     const newestHitKey = hits[0] ? `${hits[0].id}|${hits[0].amount}|${hits[0].time}` : ""; const hitChanged = Boolean(newestHitKey && overlayHitMemory.get(root) !== newestHitKey); overlayHitMemory.set(root, newestHitKey);
     const phaseState = runPhasePresentation(live);
@@ -1401,8 +1422,8 @@
     const focus = options.show.includes("focus") ? `<div class="overlay-focus confidence-${escapeHtml(focusState.confidence)} ${live.focus && scope.key === "boss" ? "" : "idle"}" title="${escapeHtml(focusState.note)}"><span>BOSS TARGET?</span><strong>${escapeHtml(focusState.player)}</strong><em>${escapeHtml(focusState.detail)}</em><i>${escapeHtml(focusState.badge)} · PROXY</i></div>` : "";
     const loadoutItems = live.loadout?.items || [];
     const loadout = options.show.includes("loadout") ? `<section class="overlay-loadout${live.loadout?.available ? "" : " unavailable"}" title="${escapeHtml(live.loadout?.sourceNote || "Loadout telemetry is unavailable.")}"><header><span>LOCAL LOADOUT</span><small>${live.loadout?.available ? `${loadoutItems.length} OBSERVED` : "NOT EXPOSED BY LOG"}</small></header>${live.loadout?.available ? `<div>${loadoutItems.length ? loadoutItems.slice(0,8).map((item)=>`<span><b>${escapeHtml(item.name)}</b><i>×${formatNumber(item.stacks)}</i></span>`).join("") : `<em>Observed empty loadout</em>`}</div>` : `<div><em>Ecliptica did not log shop item names or stacks.</em></div>`}</section>` : "";
-    const hitWidget = options.show.includes("hits") ? `<section class="overlay-feed overlay-hit-widget" aria-label="Last five local outgoing damage events"><header><div><span>LAST 5 LOCAL DAMAGE EVENTS</span><small>THE LOG EXPOSES DAMAGE CATEGORY, NOT ABILITY NAME</small></div></header>${hits.length ? hits.map((hit,index)=>{const rawAction=String(hit.action||"").toLowerCase().replaceAll("-"," ");const hasAbilityName=state.usingMock&&!["strike","non strike","outgoing hit"].includes(rawAction);return `<div class="overlay-feed-row overlay-hit-row ${index===0&&hitChanged?"newest":""}"><span class="hit-age">${hit.age<10?hit.age.toFixed(1):Math.round(hit.age)}s</span><span class="feed-name"><strong>${escapeHtml(hasAbilityName?hit.action:"LOCAL DAMAGE EVENT")}</strong><small>DAMAGE TYPE</small></span><span class="hit-type ${hit.strike?"strike":"non-strike"}">${hit.strike?"STRIKE":"NON-STRIKE"}</span><strong class="feed-amount">${formatNumber(hit.amount)}${hit.flags.includes("CRIT")?" ✦":""}</strong></div>`}).join("") : `<div class="overlay-hit-empty">Waiting for local outgoing damage…</div>`}</section>` : "";
-    const survivalWidget = options.show.includes("survival") ? `<section class="overlay-feed overlay-survival-widget" aria-label="Damage taken and healing received"><header><div><span>SURVIVAL FEED</span><small>INCOMING DAMAGE · HEALING IF EVER LOGGED</small></div><strong>${formatCompact(live.incoming.total)} <em>TAKEN</em></strong></header>${survival.length ? survival.map((event)=>`<div class="overlay-feed-row ${event.healing?"healing":"damage-taken"}"><span class="hit-age">${event.age<10?event.age.toFixed(1):Math.round(event.age)}s</span><span class="feed-name"><strong>${escapeHtml(event.label)}</strong><small>${event.healing?"HEAL RECEIVED":"DAMAGE TAKEN"}</small></span><span class="feed-vital">${event.healing?"HEAL":"HIT"}</span><strong class="feed-amount">${event.healing?"+":"−"}${formatNumber(event.amount)}</strong></div>`).join("") : `<div class="overlay-hit-empty">No recent incoming damage. Healing is not exposed by this build.</div>`}</section>` : "";
+    const hitWidget = options.show.includes("hits") ? `<section class="overlay-feed overlay-hit-widget ${hitsInactive ? "inactive" : ""}" aria-label="Last five local outgoing damage events"><header><div><span>LAST 5 LOCAL DAMAGE EVENTS</span><small>${hitsInactive ? `IDLE · LAST HIT ${formatHitAge(hits[0].age)} · RETAINED FOR PHASE` : "THE LOG EXPOSES DAMAGE CATEGORY, NOT ABILITY NAME"}</small></div></header>${hits.length ? hits.map((hit,index)=>{const rawAction=String(hit.action||"").toLowerCase().replaceAll("-"," ");const hasAbilityName=state.usingMock&&!["strike","non strike","outgoing hit"].includes(rawAction);return `<div class="overlay-feed-row overlay-hit-row ${index===0&&hitChanged?"newest":""}"><span class="hit-age">${formatHitAge(hit.age)}</span><span class="feed-name"><strong>${escapeHtml(hasAbilityName?hit.action:"LOCAL DAMAGE EVENT")}</strong><small>DAMAGE TYPE</small></span><span class="hit-type ${hit.strike?"strike":"non-strike"}">${hit.strike?"STRIKE":"NON-STRIKE"}</span><strong class="feed-amount">${formatNumber(hit.amount)}${hit.flags.includes("CRIT")?" ✦":""}</strong></div>`}).join("") : `<div class="overlay-hit-empty">Waiting for local outgoing damage…</div>`}</section>` : "";
+    const survivalWidget = options.show.includes("survival") ? `<section class="overlay-feed overlay-survival-widget" aria-label="Damage taken and healing received"><header><div><span>SURVIVAL FEED</span><small>INCOMING DAMAGE · HEALING IF EVER LOGGED</small></div><strong>${formatCompact(live.incoming.total)} <em>TAKEN</em></strong></header>${survival.length ? survival.map((event)=>`<div class="overlay-feed-row ${event.healing?"healing":"damage-taken"}"><span class="hit-age">${formatHitAge(event.age)}</span><span class="feed-name"><strong>${escapeHtml(event.label)}</strong><small>${event.healing?"HEAL RECEIVED":"DAMAGE TAKEN"}</small></span><span class="feed-vital">${event.healing?"HEAL":"HIT"}</span><strong class="feed-amount">${event.healing?"+":"−"}${formatNumber(event.amount)}</strong></div>`).join("") : `<div class="overlay-hit-empty">No recent incoming damage. Healing is not exposed by this build.</div>`}</section>` : "";
     const totalsWidget = metrics.length ? `<div class="overlay-totals">${metrics.map((metric,i)=>{const label=metric==="dps"?`${scope.metric} DPS`:metric==="damage"?`${scope.metric} DAMAGE`:"DAMAGE TAKEN";const value=metric==="dps"?live.outgoing.dps:metric==="damage"?live.outgoing.total:live.incoming.total;return `<div class="overlay-total ${i===0?"accent":""}"><span>${escapeHtml(label)}${scope.excluded&&metric!=="incoming"?" · EXCLUDED":""}</span><strong>${formatCompact(value)}</strong></div>`}).join("")}</div>` : "";
     const telemetry = options.show.includes("telemetry") ? `<div class="overlay-telemetry" title="Neither complete audited Ecliptica log contains HP, healing, gem, purchase, or soundtrack records."><span><b>HP REMAINING</b><strong>NOT LOGGED</strong></span><span><b>HEALING RECEIVED</b><strong>NOT LOGGED</strong></span><span><b>GEMS / SHOP</b><strong>NOT LOGGED</strong></span><span><b>CURRENT SONG</b><strong>NOT LOGGED</strong></span></div>` : "";
     const graph = options.show.includes("graph") ? dpsGraphMarkup(live, scope) : "";

@@ -1260,6 +1260,7 @@ const LIVE_PANEL_Y: i32 = 150;
 const LIVE_PANEL_HEIGHT: i32 = 346;
 const FEED_ROW_HEIGHT: i32 = 56;
 const FEED_ROW_STEP: i32 = 59;
+const HIT_FEED_IDLE_SECONDS: f64 = 10.0;
 
 fn render_frame(
     font: &Font,
@@ -1462,9 +1463,9 @@ fn draw_dps_panel(
 ) {
     fill_rounded_rect(pixels, x, y, width, height, 13, PANEL_ALT);
     let segment = if snapshot.encounter.kind == "boss" {
-        "BOSS FIGHT DPS"
+        "BOSS FIGHT DPS - ROLLING 5S"
     } else {
-        "PRE-BOSS DPS"
+        "PRE-BOSS DPS - ROLLING 5S"
     };
     draw_text(
         font,
@@ -1572,12 +1573,13 @@ fn draw_dps_graph(
     width: i32,
     height: i32,
 ) {
+    let phase_average = snapshot.outgoing.dps.max(0.0);
     let maximum = snapshot
         .timeline
         .iter()
         .map(|point| point.rolling_dps)
         .filter(|value| value.is_finite() && *value >= 0.0)
-        .fold(snapshot.outgoing.rolling_5s.max(0.0), f64::max);
+        .fold(snapshot.outgoing.rolling_5s.max(phase_average), f64::max);
     let count = snapshot
         .timeline
         .iter()
@@ -1596,6 +1598,36 @@ fn draw_dps_graph(
             1,
         );
     }
+    let plot_left = x + 8;
+    let plot_right = x + width - 8;
+    let plot_top = y + 12;
+    let plot_bottom = y + height - 12;
+    if phase_average > 0.0 && maximum > 0.0 {
+        let fraction_y = (phase_average / maximum).clamp(0.0, 1.0);
+        let average_y = plot_bottom - ((plot_bottom - plot_top) as f64 * fraction_y).round() as i32;
+        for dash_start in (plot_left..plot_right).step_by(12) {
+            draw_line(
+                pixels,
+                dash_start,
+                average_y,
+                (dash_start + 7).min(plot_right),
+                average_y,
+                VIOLET,
+                2,
+            );
+        }
+        draw_text_right(
+            font,
+            glyphs,
+            pixels,
+            &format!("PHASE AVG {} /s", compact_number(phase_average)),
+            x + width - 12,
+            y + 19,
+            13,
+            VIOLET,
+            width - 110,
+        );
+    }
     if count < 2 || maximum <= 0.0 {
         draw_text(
             font,
@@ -1611,10 +1643,6 @@ fn draw_dps_graph(
         return;
     }
 
-    let plot_left = x + 8;
-    let plot_right = x + width - 8;
-    let plot_top = y + 12;
-    let plot_bottom = y + height - 12;
     let mut previous = None;
     for (visible_index, point) in snapshot
         .timeline
@@ -1668,15 +1696,28 @@ fn draw_outgoing_feed(
         WHITE,
         width - 135,
     );
+    let hits = if settings.show_recent_hits {
+        recent_local_hits(snapshot, settings.recent_hit_rows.min(5) as usize)
+    } else {
+        Vec::new()
+    };
+    let inactive = hits
+        .first()
+        .is_some_and(|hit| hit.age_seconds >= HIT_FEED_IDLE_SECONDS);
+    let header_detail = if inactive {
+        format!("IDLE {}", format_age(hits[0].age_seconds))
+    } else {
+        "CATEGORY ONLY".to_owned()
+    };
     draw_text_right(
         font,
         glyphs,
         pixels,
-        "CATEGORY ONLY",
+        &header_detail,
         x + width - 13,
         y + 25,
         13,
-        ORANGE,
+        if inactive { VIOLET } else { ORANGE },
         122,
     );
     if !settings.show_recent_hits {
@@ -1694,7 +1735,6 @@ fn draw_outgoing_feed(
         return;
     }
 
-    let hits = recent_local_hits(snapshot, settings.recent_hit_rows.min(5) as usize);
     if hits.is_empty() {
         draw_text(
             font,
@@ -1720,7 +1760,11 @@ fn draw_outgoing_feed(
                 width - 16,
                 FEED_ROW_HEIGHT,
                 6,
-                Color(27, 39, 62, 150),
+                if inactive {
+                    Color(27, 39, 62, 78)
+                } else {
+                    Color(27, 39, 62, 150)
+                },
             );
         }
         draw_text(
@@ -1731,7 +1775,7 @@ fn draw_outgoing_feed(
             x + 14,
             row_y + 39,
             28,
-            ORANGE,
+            if inactive { MUTED } else { ORANGE },
             105,
         );
         let category = if hit.damage_type.eq_ignore_ascii_case("non-strike")
@@ -1751,7 +1795,7 @@ fn draw_outgoing_feed(
             x + 119,
             row_y + 36,
             18,
-            WHITE,
+            if inactive { DIM } else { WHITE },
             width - 190,
         );
         draw_text_right(
@@ -2358,8 +2402,10 @@ fn format_age(seconds: f64) -> String {
         "<1s".to_owned()
     } else if seconds < 60.0 {
         format!("{seconds:.0}s")
-    } else {
+    } else if seconds < 3_600.0 {
         format!("{:.0}m", seconds / 60.0)
+    } else {
+        format!("{:.0}h", seconds / 3_600.0)
     }
 }
 
@@ -3143,6 +3189,7 @@ mod tests {
             outgoing: DamageTotals {
                 total: 12_400.0,
                 rolling_5s: 900.0,
+                dps: 500.0,
                 ..DamageTotals::default()
             },
             timeline: vec![
@@ -3185,6 +3232,44 @@ mod tests {
         assert!(
             cyan_graph_pixels > 100,
             "the current-segment timeline should produce an obvious cyan line"
+        );
+        let violet_average_pixels = (200..354)
+            .flat_map(|y| (39..319).map(move |x| (y * HUD_TEXTURE_WIDTH + x) * 4))
+            .filter(|index| frame[*index..*index + 4] == [VIOLET.0, VIOLET.1, VIOLET.2, VIOLET.3])
+            .count();
+        assert!(
+            violet_average_pixels > 40,
+            "the graph should include a visible violet phase-average line and label"
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn inactive_hit_feed_dims_without_dropping_phase_rows() {
+        let time = NaiveDate::from_ymd_opt(2026, 7, 22)
+            .unwrap()
+            .and_hms_opt(20, 0, 0)
+            .unwrap();
+        let mut snapshot = EngineSnapshot {
+            recent_hits: vec![minmaxxer_core::aggregate::RecentHit {
+                timestamp: time,
+                amount: 1_234.0,
+                damage_type: "strike".to_owned(),
+                age_seconds: 2.0,
+            }],
+            ..EngineSnapshot::default()
+        };
+        let settings = VrOverlaySettings::default();
+        let mut renderer = HudRenderer::new().expect("Windows includes Segoe UI");
+        let active = renderer.render(&snapshot, &settings).to_vec();
+
+        snapshot.recent_hits[0].age_seconds = HIT_FEED_IDLE_SECONDS + 1.0;
+        let inactive = renderer.render(&snapshot, &settings);
+
+        assert_eq!(recent_local_hits(&snapshot, 5).len(), 1);
+        assert!(
+            changed_pixels_in_region(&active, inactive, 346, LIVE_PANEL_Y as usize, 672, 496) > 100,
+            "idle rendering should visibly dim the feed without removing its row"
         );
     }
 

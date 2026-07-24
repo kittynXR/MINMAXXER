@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 const RECENT_EVENT_LIMIT: usize = 40;
-const RECENT_HIT_DISPLAY_SECONDS: f64 = 60.0;
+const PHASE_HIT_LIMIT: usize = 12;
 const DAMAGE_WINDOW_SECONDS: i64 = 30;
 const MERGED_BOUNDARY_TOLERANCE_SECONDS: i64 = 10;
 const FOCUS_RECENT_SECONDS: f64 = 45.0;
@@ -75,12 +75,20 @@ pub struct FocusSignal {
 /// A fresh exact-boss focus observation plus the local identity known at that log line. The app
 /// consumes this discrete signal for audio alerts so rapid ownership changes cannot be collapsed
 /// by the latest-value HUD snapshot channel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BossTargetObservationCause {
+    Baseline,
+    OwnershipTransfer,
+    LocalIdentity,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct BossTargetObservation {
     pub focus: FocusSignal,
     pub observed_player: Option<String>,
     pub encounter_name: String,
     pub encounter_started_at: Option<NaiveDateTime>,
+    pub cause: BossTargetObservationCause,
 }
 
 /// Live position within Ecliptica's 13-boss run. `boss_number` describes the upcoming boss while
@@ -214,6 +222,7 @@ pub struct CombatEngine {
     damage_by_type: BTreeMap<String, (f64, u64, f64, f64)>,
     damage_window: VecDeque<(NaiveDateTime, f64)>,
     timeline: VecDeque<TimelinePoint>,
+    phase_hits: VecDeque<RecentHit>,
     recent_events: VecDeque<GameEvent>,
     coverage: ParserCoverage,
     source_file: Option<String>,
@@ -248,6 +257,7 @@ impl CombatEngine {
             damage_by_type: BTreeMap::new(),
             damage_window: VecDeque::new(),
             timeline: VecDeque::new(),
+            phase_hits: VecDeque::new(),
             recent_events: VecDeque::new(),
             coverage: ParserCoverage::default(),
             source_file: None,
@@ -287,6 +297,7 @@ impl CombatEngine {
             observed_player: self.observed_player.clone(),
             encounter_name: self.encounter.name.clone(),
             encounter_started_at: self.encounter.started_at,
+            cause: BossTargetObservationCause::Baseline,
         })
     }
 
@@ -334,6 +345,7 @@ impl CombatEngine {
                 self.in_world = false;
                 self.encounter.active = false;
                 self.focus = None;
+                self.phase_hits.clear();
                 self.reset_run_context();
                 self.session_id = None;
                 self.world = None;
@@ -395,6 +407,7 @@ impl CombatEngine {
                 self.update_duration(event.timestamp);
                 self.encounter.active = false;
                 self.focus = None;
+                self.phase_hits.clear();
                 self.run_context.boss_subphase = None;
                 if event.kind == EventKind::Lobby {
                     self.stage = None;
@@ -413,6 +426,7 @@ impl CombatEngine {
                     self.update_duration(event.timestamp);
                     self.encounter.active = false;
                     self.focus = None;
+                    self.phase_hits.clear();
                     self.run_context.boss_subphase = None;
                 }
             }
@@ -445,6 +459,11 @@ impl CombatEngine {
             observed_player: self.observed_player.clone(),
             encounter_name: self.encounter.name.clone(),
             encounter_started_at: self.encounter.started_at,
+            cause: if focus_changed {
+                BossTargetObservationCause::OwnershipTransfer
+            } else {
+                BossTargetObservationCause::LocalIdentity
+            },
         })
     }
 
@@ -589,18 +608,7 @@ impl CombatEngine {
     }
 
     pub fn requires_clock_tick_at(&self, now: Option<NaiveDateTime>) -> bool {
-        self.encounter.active
-            || self.current_focus_at(now).is_some()
-            || self
-                .recent_events
-                .iter()
-                .rev()
-                .find(|event| event.kind == EventKind::DamageDealt)
-                .is_some_and(|event| {
-                    now.map(|now| seconds_between(event.timestamp, now))
-                        .unwrap_or_default()
-                        <= RECENT_HIT_DISPLAY_SECONDS + 1.0
-                })
+        self.encounter.active || self.current_focus_at(now).is_some()
     }
 
     fn begin_encounter(
@@ -782,6 +790,7 @@ impl CombatEngine {
         self.damage_by_type.clear();
         self.damage_window.clear();
         self.timeline.clear();
+        self.phase_hits.clear();
     }
 
     fn add_outgoing(&mut self, event: &GameEvent) {
@@ -802,10 +811,10 @@ impl CombatEngine {
         } else {
             self.outgoing.non_strike += amount;
         }
-        let entry = self
-            .damage_by_type
-            .entry(damage_type)
-            .or_insert((0.0, 0, f64::MAX, 0.0));
+        let entry =
+            self.damage_by_type
+                .entry(damage_type.clone())
+                .or_insert((0.0, 0, f64::MAX, 0.0));
         entry.0 += amount;
         entry.1 += 1;
         entry.2 = entry.2.min(amount);
@@ -817,6 +826,15 @@ impl CombatEngine {
             self.damage_window.pop_front();
         }
         self.push_timeline(event.timestamp, amount, 0.0);
+        if self.phase_hits.len() == PHASE_HIT_LIMIT {
+            self.phase_hits.pop_back();
+        }
+        self.phase_hits.push_front(RecentHit {
+            timestamp: event.timestamp,
+            amount,
+            damage_type,
+            age_seconds: 0.0,
+        });
         self.update_duration(event.timestamp);
     }
 
@@ -996,26 +1014,15 @@ impl CombatEngine {
     }
 
     fn recent_hits_at(&self, limit: usize, now: Option<NaiveDateTime>) -> Vec<RecentHit> {
-        self.recent_events
+        self.phase_hits
             .iter()
-            .rev()
-            .filter(|event| event.kind == EventKind::DamageDealt)
-            .filter(|event| {
-                now.map(|now| seconds_between(event.timestamp, now))
-                    .unwrap_or_default()
-                    <= RECENT_HIT_DISPLAY_SECONDS
-            })
             .take(limit)
-            .map(|event| RecentHit {
-                timestamp: event.timestamp,
-                amount: event.amount(),
-                damage_type: event
-                    .damage_type
-                    .clone()
-                    .unwrap_or_else(|| "unknown".to_owned()),
-                age_seconds: now
-                    .map(|now| seconds_between(event.timestamp, now))
-                    .unwrap_or_default(),
+            .cloned()
+            .map(|mut hit| {
+                hit.age_seconds = now
+                    .map(|now| seconds_between(hit.timestamp, now))
+                    .unwrap_or_default();
+                hit
             })
             .collect()
     }
@@ -2576,6 +2583,55 @@ mod tests {
             .recent_hits
             .is_empty());
         assert!(!engine.requires_clock_tick_at(Some(expiry_clock + chrono::Duration::seconds(1))));
+    }
+
+    #[test]
+    fn phase_hits_survive_idle_time_and_unrelated_event_churn_until_the_next_phase() {
+        let mut engine = CombatEngine::new();
+        engine.ingest(event(0, EventKind::BossStarted, 0.0));
+        engine.ingest(event(1, EventKind::DamageDealt, 345.0));
+        for second in 2..=50 {
+            engine.ingest(event(second, EventKind::GameMessage, 0.0));
+        }
+
+        let five_minutes_later =
+            event(1, EventKind::DamageDealt, 0.0).timestamp + chrono::Duration::minutes(5);
+        let retained = engine.snapshot_at(Some(five_minutes_later));
+        assert_eq!(retained.recent_hits.len(), 1);
+        assert_eq!(retained.recent_hits[0].amount, 345.0);
+        assert_eq!(retained.recent_hits[0].age_seconds, 300.0);
+
+        engine.ingest(stage_event(51, "Stage_Next", BOSS_PROGRESS_ANCHORS[1]));
+        assert!(engine.snapshot().recent_hits.is_empty());
+    }
+
+    #[test]
+    fn only_a_matching_boss_defeat_clears_the_current_phase_hits() {
+        let mut engine = CombatEngine::new();
+        engine.ingest(event(0, EventKind::BossStarted, 0.0));
+        engine.ingest(event(1, EventKind::DamageDealt, 345.0));
+
+        let mut stale_defeat = event(2, EventKind::BossDefeated, 0.0);
+        stale_defeat.boss = Some("EarlierBoss".to_owned());
+        engine.ingest(stale_defeat);
+        assert_eq!(engine.snapshot().recent_hits.len(), 1);
+
+        engine.ingest(event(3, EventKind::BossDefeated, 0.0));
+        assert!(engine.snapshot().recent_hits.is_empty());
+    }
+
+    #[test]
+    fn phase_hit_feed_is_bounded_and_newest_first() {
+        let mut engine = CombatEngine::new();
+        engine.ingest(event(0, EventKind::BossStarted, 0.0));
+        for second in 1..=13 {
+            engine.ingest(event(second, EventKind::DamageDealt, f64::from(second)));
+        }
+
+        let hits = engine.snapshot().recent_hits;
+        assert_eq!(hits.len(), PHASE_HIT_LIMIT);
+        assert_eq!(hits.first().map(|hit| hit.amount), Some(13.0));
+        assert_eq!(hits.last().map(|hit| hit.amount), Some(2.0));
     }
 
     #[test]

@@ -17,6 +17,7 @@ VRChat output_log_*.txt
         +-- OBS browser source
         +-- click-through VRChat desktop overlay
         +-- native OpenVR RGBA overlay
+        +-- native WinMM boss-target alert
 ```
 
 ## Resource choices
@@ -25,6 +26,11 @@ VRChat output_log_*.txt
 - Parsing is line-oriented and incremental; the active partial line and a 64 KiB read buffer are the only file buffers.
 - SQLite uses WAL mode and batched inserts keyed by source path and byte offset.
 - Live clients share a Tokio watch channel, so only the newest snapshot is retained.
+- Exact-boss ownership lines also enter a discrete, non-coalescing alert channel after their
+  storage batch succeeds. Startup, rescan, rotation, and recovery replays contribute only a silent
+  final-state baseline before newly appended edges. A dormant async task plays one embedded PCM
+  WAV through WinMM only on a fresh transition onto the local player. It adds no decoder, audio
+  engine, polling loop, or browser-audio surface.
 - OBS and desktop overlays reuse the same loopback HTML/CSS/JavaScript assets.
 - The VR overlay avoids a second browser process. It rasterizes a dense HUD with `fontdue`, reuses a 1024 × 512 RGBA allocation, redraws only on changes, and caps OpenVR uploads at 4 Hz. Width, opacity, curvature, and transform writes are cached separately so a texture redraw does not reconfigure the compositor.
 - SteamVR is not initialized until the VR output is enabled.

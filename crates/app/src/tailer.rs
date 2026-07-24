@@ -1,21 +1,96 @@
+use crate::boss_alert::{BossTargetEvent, BossTargetUpdate};
 use crate::config::AppConfig;
 use crate::storage::Storage;
 use anyhow::{Context, Result};
 use chrono::Local;
-use minmaxxer_core::{CombatEngine, EclipticaParser, EngineSnapshot, ParseOutcome};
+use minmaxxer_core::{
+    BossTargetObservation, CombatEngine, EclipticaParser, EngineSnapshot, ParseOutcome,
+};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tokio::sync::watch;
+use tokio::sync::{mpsc as tokio_mpsc, watch};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
 const DIRECTORY_SCAN_INTERVAL: Duration = Duration::from_secs(2);
 const CLOCK_SNAPSHOT_INTERVAL: Duration = Duration::from_secs(1);
 const LIVE_ACTIVITY_THRESHOLD: Duration = Duration::from_secs(5 * 60);
 const READ_BUFFER_SIZE: usize = 64 * 1024;
+type BossTargetSender = tokio_mpsc::UnboundedSender<BossTargetUpdate>;
+
+struct PendingBossTargetUpdates {
+    source_file: String,
+    baseline_after_offset: Option<u64>,
+    baseline: Option<Option<BossTargetEvent>>,
+    live: Vec<BossTargetEvent>,
+}
+
+impl PendingBossTargetUpdates {
+    fn new(path: &Path, baseline_after_offset: Option<u64>) -> Self {
+        Self {
+            source_file: path.to_string_lossy().into_owned(),
+            baseline_after_offset,
+            baseline: None,
+            live: Vec::new(),
+        }
+    }
+
+    fn before_line(&mut self, line_end: u64, engine: &CombatEngine) {
+        if self
+            .baseline_after_offset
+            .is_some_and(|offset| line_end > offset)
+            && self.baseline.is_none()
+        {
+            self.capture_baseline(engine);
+        }
+    }
+
+    fn record(&mut self, line_end: u64, observation: BossTargetObservation) {
+        if self
+            .baseline_after_offset
+            .is_none_or(|offset| line_end > offset)
+        {
+            self.live.push(target_event(&self.source_file, observation));
+        }
+    }
+
+    fn finish_replay(&mut self, engine: &CombatEngine) {
+        if self.baseline_after_offset.is_some() && self.baseline.is_none() {
+            self.capture_baseline(engine);
+        }
+    }
+
+    fn capture_baseline(&mut self, engine: &CombatEngine) {
+        self.baseline = Some(
+            engine
+                .boss_target_baseline()
+                .map(|observation| target_event(&self.source_file, observation)),
+        );
+    }
+
+    fn publish(self, sender: &BossTargetSender) {
+        if let Some(baseline) = self.baseline {
+            let _ = sender.send(BossTargetUpdate::Baseline(baseline));
+        }
+        for event in self.live {
+            let _ = sender.send(BossTargetUpdate::Live(event));
+        }
+    }
+}
+
+fn target_event(source_file: &str, observation: BossTargetObservation) -> BossTargetEvent {
+    BossTargetEvent {
+        source_file: source_file.to_owned(),
+        encounter_name: observation.encounter_name,
+        encounter_started_at: observation.encounter_started_at,
+        target_player: observation.focus.player,
+        observed_player: observation.observed_player,
+        observed_at: observation.focus.observed_at,
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CollectorSettings {
@@ -93,12 +168,15 @@ pub fn spawn_collector(
     settings: CollectorSettings,
     storage: Arc<Storage>,
     snapshots: watch::Sender<EngineSnapshot>,
+    boss_target_events: BossTargetSender,
 ) -> CollectorHandle {
     let (commands, receiver) = mpsc::channel();
     thread::Builder::new()
         .name("minmaxxer-log-collector".to_owned())
         .spawn(move || {
-            if let Err(error) = collector_main(settings, storage, snapshots, receiver) {
+            if let Err(error) =
+                collector_main(settings, storage, snapshots, boss_target_events, receiver)
+            {
                 tracing::error!(%error, "log collector stopped unexpectedly");
             }
         })
@@ -110,11 +188,18 @@ fn collector_main(
     mut settings: CollectorSettings,
     storage: Arc<Storage>,
     snapshots: watch::Sender<EngineSnapshot>,
+    boss_target_events: BossTargetSender,
     commands: mpsc::Receiver<CollectorCommand>,
 ) -> Result<()> {
     let mut engine = CombatEngine::new();
     let mut active: Option<ActiveTail> = None;
-    if let Err(error) = reload_collection(&settings, &storage, &mut engine, &mut active) {
+    if let Err(error) = reload_collection(
+        &settings,
+        &storage,
+        &mut engine,
+        &mut active,
+        Some(&boss_target_events),
+    ) {
         tracing::warn!(%error, "initial VRChat log scan failed; collector will retry");
     }
     let _ = snapshots.send(engine.snapshot_at(Some(Local::now().naive_local())));
@@ -134,9 +219,13 @@ fn collector_main(
             Ok(CollectorCommand::Reconfigure(next)) => {
                 if next != settings {
                     settings = next;
-                    if let Err(error) =
-                        reload_collection(&settings, &storage, &mut engine, &mut active)
-                    {
+                    if let Err(error) = reload_collection(
+                        &settings,
+                        &storage,
+                        &mut engine,
+                        &mut active,
+                        Some(&boss_target_events),
+                    ) {
                         tracing::warn!(%error, "VRChat log reconfiguration failed; collector will retry");
                     }
                     last_directory_scan = Instant::now();
@@ -144,8 +233,13 @@ fn collector_main(
                 }
             }
             Ok(CollectorCommand::Rescan) => {
-                if let Err(error) = reload_collection(&settings, &storage, &mut engine, &mut active)
-                {
+                if let Err(error) = reload_collection(
+                    &settings,
+                    &storage,
+                    &mut engine,
+                    &mut active,
+                    Some(&boss_target_events),
+                ) {
                     tracing::warn!(%error, "VRChat log rescan failed");
                 } else {
                     last_directory_scan = Instant::now();
@@ -175,12 +269,21 @@ fn collector_main(
                 }
                 engine = CombatEngine::new();
                 if let Some(path) = newest {
-                    match open_newest(path, settings.historical_days(), &storage, &mut engine) {
+                    match open_newest(
+                        path,
+                        settings.historical_days(),
+                        &storage,
+                        &mut engine,
+                        Some(&boss_target_events),
+                        None,
+                    ) {
                         Ok(tail) => active = Some(tail),
                         Err(error) => {
                             tracing::warn!(%error, "could not open newest VRChat log; collector will retry");
                         }
                     }
+                } else {
+                    let _ = boss_target_events.send(BossTargetUpdate::Baseline(None));
                 }
                 changed = true;
             }
@@ -188,7 +291,7 @@ fn collector_main(
 
         let drain_result = active
             .as_mut()
-            .map(|tail| tail.drain(&storage, &mut engine));
+            .map(|tail| tail.drain(&storage, &mut engine, Some(&boss_target_events), None));
         match drain_result {
             Some(Ok(tail_changed)) => {
                 changed |= tail_changed;
@@ -227,6 +330,7 @@ fn reload_collection(
     storage: &Storage,
     engine: &mut CombatEngine,
     active: &mut Option<ActiveTail>,
+    boss_target_events: Option<&BossTargetSender>,
 ) -> Result<()> {
     // Dropping the previous handle avoids treating a still-open partial line as a completed line
     // during a user-requested rescan or directory change.
@@ -235,6 +339,9 @@ fn reload_collection(
 
     let mut logs = discover_logs(&settings.log_directory)?;
     if logs.is_empty() {
+        if let Some(sender) = boss_target_events {
+            let _ = sender.send(BossTargetUpdate::Baseline(None));
+        }
         return Ok(());
     }
     let newest = logs.last().cloned();
@@ -258,7 +365,16 @@ fn reload_collection(
     }
 
     if let Some(path) = newest {
-        *active = Some(open_newest(path, historical_days, storage, engine)?);
+        *active = Some(open_newest(
+            path,
+            historical_days,
+            storage,
+            engine,
+            boss_target_events,
+            None,
+        )?);
+    } else if let Some(sender) = boss_target_events {
+        let _ = sender.send(BossTargetUpdate::Baseline(None));
     }
     Ok(())
 }
@@ -268,10 +384,23 @@ fn open_newest(
     historical_days: u32,
     storage: &Storage,
     engine: &mut CombatEngine,
+    boss_target_events: Option<&BossTargetSender>,
+    alert_after_offset: Option<u64>,
 ) -> Result<ActiveTail> {
     let metadata = std::fs::metadata(&path)?;
     if is_recently_active(&metadata, SystemTime::now()) {
-        return ActiveTail::open_and_replay(path, storage, engine);
+        // A newly discovered file may already contain minutes of history after a delayed scan or
+        // system resume. Baseline its present EOF and emit only lines appended concurrently with
+        // or after the replay; sounding old target transfers would be actively misleading.
+        let alert_after_offset =
+            boss_target_events.map(|_| alert_after_offset.unwrap_or(metadata.len()));
+        return ActiveTail::open_and_replay(
+            path,
+            storage,
+            engine,
+            boss_target_events,
+            alert_after_offset,
+        );
     }
 
     // A completed log may still belong in history, but it must not seed a live HUD. With history
@@ -279,7 +408,11 @@ fn open_newest(
     if within_history_window(&metadata, historical_days, SystemTime::now()) {
         import_complete_file_if_needed(&path, &metadata, storage)?;
     }
-    ActiveTail::open_dormant(path)
+    let tail = ActiveTail::open_dormant(path)?;
+    if let Some(sender) = boss_target_events {
+        let _ = sender.send(BossTargetUpdate::Baseline(None));
+    }
+    Ok(tail)
 }
 
 fn import_complete_file_if_needed(
@@ -362,6 +495,7 @@ fn import_complete_file(path: &Path, storage: &Storage) -> Result<()> {
             &mut parser,
             storage,
             None,
+            None,
             &mut pending_events,
         )?;
         if consumed > 0 {
@@ -388,6 +522,7 @@ fn import_complete_file(path: &Path, storage: &Storage) -> Result<()> {
             &buffer,
             &mut parser,
             storage,
+            None,
             None,
             &mut pending_events,
         )?;
@@ -425,6 +560,8 @@ impl ActiveTail {
         path: PathBuf,
         storage: &Storage,
         engine: &mut CombatEngine,
+        boss_target_events: Option<&BossTargetSender>,
+        alert_after_offset: Option<u64>,
     ) -> Result<Self> {
         let file = open_shared(&path)?;
         let metadata = file.metadata()?;
@@ -447,7 +584,7 @@ impl ActiveTail {
             live: true,
         };
         engine.set_source_file(Some(path.to_string_lossy().into_owned()));
-        tail.drain(storage, engine)?;
+        tail.drain(storage, engine, boss_target_events, alert_after_offset)?;
         engine.set_coverage(tail.parser.coverage().clone());
         Ok(tail)
     }
@@ -468,7 +605,13 @@ impl ActiveTail {
         })
     }
 
-    fn drain(&mut self, storage: &Storage, engine: &mut CombatEngine) -> Result<bool> {
+    fn drain(
+        &mut self,
+        storage: &Storage,
+        engine: &mut CombatEngine,
+        boss_target_events: Option<&BossTargetSender>,
+        alert_after_offset: Option<u64>,
+    ) -> Result<bool> {
         let metadata = self.file.metadata()?;
         let current_modified_millis = modified_millis(&metadata);
         if !self.live {
@@ -478,15 +621,31 @@ impl ActiveTail {
             if metadata.len() <= self.last_size {
                 storage.reset_source(&self.path)?;
             }
+            // A dormant path may have been replaced and regrown beyond the former EOF between
+            // polls. Treat every byte present at wake-up as a silent baseline; only a concurrent
+            // append beyond this captured length is safe to classify as live.
+            let baseline_offset = metadata.len();
             *engine = CombatEngine::new();
-            *self = Self::open_and_replay(self.path.clone(), storage, engine)?;
+            *self = Self::open_and_replay(
+                self.path.clone(),
+                storage,
+                engine,
+                boss_target_events,
+                boss_target_events.map(|_| baseline_offset),
+            )?;
             return Ok(true);
         }
         if metadata.len() < self.cursor {
             tracing::warn!(path = %self.path.display(), "active log was truncated; replaying");
             storage.reset_source(&self.path)?;
             *engine = CombatEngine::new();
-            *self = Self::open_and_replay(self.path.clone(), storage, engine)?;
+            *self = Self::open_and_replay(
+                self.path.clone(),
+                storage,
+                engine,
+                boss_target_events,
+                boss_target_events.map(|_| metadata.len()),
+            )?;
             return Ok(true);
         }
         self.last_size = metadata.len();
@@ -498,7 +657,17 @@ impl ActiveTail {
                 self.live = false;
                 self.partial.clear();
                 *engine = CombatEngine::new();
+                if let Some(sender) = boss_target_events {
+                    let _ = sender.send(BossTargetUpdate::Baseline(None));
+                }
                 return Ok(true);
+            }
+            if alert_after_offset.is_some() {
+                if let Some(sender) = boss_target_events {
+                    let mut pending = PendingBossTargetUpdates::new(&self.path, alert_after_offset);
+                    pending.finish_replay(engine);
+                    pending.publish(sender);
+                }
             }
             return Ok(false);
         }
@@ -506,6 +675,8 @@ impl ActiveTail {
         self.cursor += bytes.len() as u64;
         self.partial.extend_from_slice(&bytes);
         let mut events = Vec::new();
+        let mut pending_boss_targets = boss_target_events
+            .map(|_| PendingBossTargetUpdates::new(&self.path, alert_after_offset));
         let consumed = consume_complete_lines(
             &self.path,
             buffer_start,
@@ -513,8 +684,12 @@ impl ActiveTail {
             &mut self.parser,
             storage,
             Some(engine),
+            pending_boss_targets.as_mut(),
             &mut events,
         )?;
+        if let Some(pending) = pending_boss_targets.as_mut() {
+            pending.finish_replay(engine);
+        }
         if consumed > 0 {
             self.partial.drain(..consumed);
         }
@@ -526,6 +701,9 @@ impl ActiveTail {
             self.modified_millis,
             false,
         )?;
+        if let (Some(sender), Some(pending)) = (boss_target_events, pending_boss_targets) {
+            pending.publish(sender);
+        }
         // Ignored VRChat noise can be frequent; only semantic parser events warrant a full HUD
         // snapshot broadcast.
         Ok(!events.is_empty())
@@ -536,7 +714,7 @@ impl ActiveTail {
             return Ok(());
         }
         let mut sink = CombatEngine::new();
-        let _ = self.drain(storage, &mut sink)?;
+        let _ = self.drain(storage, &mut sink, None, None)?;
         if !self.partial.is_empty() {
             let start = self.cursor.saturating_sub(self.partial.len() as u64);
             let mut events = Vec::new();
@@ -546,6 +724,7 @@ impl ActiveTail {
                 &self.partial,
                 &mut self.parser,
                 storage,
+                None,
                 None,
                 &mut events,
             )?;
@@ -579,6 +758,7 @@ fn consume_complete_lines(
     parser: &mut EclipticaParser,
     storage: &Storage,
     mut engine: Option<&mut CombatEngine>,
+    mut pending_boss_targets: Option<&mut PendingBossTargetUpdates>,
     events: &mut Vec<(u64, minmaxxer_core::GameEvent)>,
 ) -> Result<usize> {
     let mut consumed = 0;
@@ -595,6 +775,7 @@ fn consume_complete_lines(
             parser,
             storage,
             engine.as_deref_mut(),
+            pending_boss_targets.as_deref_mut(),
             events,
         )?;
         consumed = index + 1;
@@ -610,6 +791,7 @@ fn consume_one_line(
     parser: &mut EclipticaParser,
     storage: &Storage,
     engine: Option<&mut CombatEngine>,
+    mut pending_boss_targets: Option<&mut PendingBossTargetUpdates>,
     events: &mut Vec<(u64, minmaxxer_core::GameEvent)>,
 ) -> Result<()> {
     let line = String::from_utf8_lossy(bytes);
@@ -617,7 +799,14 @@ fn consume_one_line(
     match parser.process_line(line) {
         ParseOutcome::Event(event) => {
             if let Some(engine) = engine {
-                engine.ingest(event.clone());
+                let line_end = offset.saturating_add(bytes.len() as u64);
+                if let Some(pending) = pending_boss_targets.as_deref_mut() {
+                    pending.before_line(line_end, engine);
+                }
+                let observation = engine.ingest_with_boss_target_observation(event.clone());
+                if let (Some(observation), Some(pending)) = (observation, pending_boss_targets) {
+                    pending.record(line_end, observation);
+                }
             }
             events.push((offset, event));
         }
@@ -675,6 +864,25 @@ fn modified_millis(metadata: &std::fs::Metadata) -> i64 {
 mod tests {
     use super::*;
 
+    fn temporary_storage(label: &str) -> (Storage, PathBuf) {
+        let path = std::env::temp_dir().join(format!(
+            "minmaxxer-{label}-{}-{}.sqlite",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_file(&path);
+        (Storage::open(&path).unwrap(), path)
+    }
+
+    fn remove_storage_files(path: &Path) {
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(format!("{}-wal", path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", path.display()));
+    }
+
     #[test]
     fn disabling_auto_import_means_zero_historical_days() {
         let settings = CollectorSettings {
@@ -707,5 +915,252 @@ mod tests {
             modified + LIVE_ACTIVITY_THRESHOLD + Duration::from_secs(1)
         ));
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn reloading_an_empty_log_directory_clears_the_boss_target_baseline() {
+        let directory = std::env::temp_dir().join(format!(
+            "minmaxxer-empty-logs-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+
+        let (storage, database_path) = temporary_storage("boss-alert-empty-directory");
+        let settings = CollectorSettings {
+            log_directory: directory.clone(),
+            import_days: 30,
+            auto_import_recent_logs: true,
+        };
+        let mut engine = CombatEngine::new();
+        let mut active: Option<ActiveTail> = None;
+        let (sender, mut receiver) = tokio_mpsc::unbounded_channel();
+
+        reload_collection(&settings, &storage, &mut engine, &mut active, Some(&sender)).unwrap();
+
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(BossTargetUpdate::Baseline(None))
+        ));
+        assert!(receiver.try_recv().is_err());
+        assert!(active.is_none());
+
+        drop(storage);
+        remove_storage_files(&database_path);
+        std::fs::remove_dir(directory).unwrap();
+    }
+
+    #[test]
+    fn replay_baselines_silently_and_rapid_live_focus_edges_are_not_coalesced() {
+        let (storage, database_path) = temporary_storage("boss-alert-edges");
+        let source = Path::new("output_log_live.txt");
+        let mut parser = EclipticaParser::new();
+        let mut engine = CombatEngine::new();
+        let mut parsed_events = Vec::new();
+        let replay = concat!(
+            "2026.07.23 20:00:00 Debug      -  [Behaviour] Entering Room: Ecliptica - Demo Playtest\n",
+            "2026.07.23 20:00:01 Debug      -  [Behaviour] Initialized PlayerAPI \"Local Player\" is local\n",
+            "2026.07.23 20:00:02 Debug      -  ECLIPTICA - now fighting boss: Astral Sovereign on phase: 0.1\n",
+            "2026.07.23 20:00:03 Debug      -  ownership of Astral Sovereign transferred to Local Player\n",
+            "2026.07.23 20:00:03 Debug      -  ownership of Astral Sovereign transferred to Other Player\n",
+        );
+        let (sender, mut receiver) = tokio_mpsc::unbounded_channel();
+        let mut replay_updates = PendingBossTargetUpdates::new(source, Some(replay.len() as u64));
+
+        consume_complete_lines(
+            source,
+            0,
+            replay.as_bytes(),
+            &mut parser,
+            &storage,
+            Some(&mut engine),
+            Some(&mut replay_updates),
+            &mut parsed_events,
+        )
+        .unwrap();
+        replay_updates.finish_replay(&engine);
+        assert!(
+            receiver.try_recv().is_err(),
+            "parser output must remain buffered until the storage batch succeeds"
+        );
+        replay_updates.publish(&sender);
+        let BossTargetUpdate::Baseline(Some(baseline)) = receiver
+            .try_recv()
+            .expect("replay should synchronize silently")
+        else {
+            panic!("expected a retained-target baseline");
+        };
+        assert_eq!(baseline.target_player, "Other Player");
+
+        let live = concat!(
+            "2026.07.23 20:00:04 Debug      -  ownership of Astral-Sovereign transferred to Local Player\n",
+            "2026.07.23 20:00:04 Debug      -  ownership of Astral Sovereign transferred to Other Player\n",
+        );
+        let mut live_updates = PendingBossTargetUpdates::new(source, None);
+        consume_complete_lines(
+            source,
+            replay.len() as u64,
+            live.as_bytes(),
+            &mut parser,
+            &storage,
+            Some(&mut engine),
+            Some(&mut live_updates),
+            &mut parsed_events,
+        )
+        .unwrap();
+        assert!(
+            receiver.try_recv().is_err(),
+            "live edges must remain buffered until the storage batch succeeds"
+        );
+        live_updates.publish(&sender);
+
+        let mut targets = Vec::new();
+        while let Ok(update) = receiver.try_recv() {
+            let BossTargetUpdate::Live(event) = update else {
+                panic!("normal append should emit live target events");
+            };
+            targets.push((event.target_player, event.encounter_name));
+        }
+        assert_eq!(
+            targets,
+            [
+                ("Local Player".to_owned(), "Astral Sovereign".to_owned()),
+                ("Other Player".to_owned(), "Astral Sovereign".to_owned())
+            ]
+        );
+
+        drop(storage);
+        remove_storage_files(&database_path);
+    }
+
+    #[test]
+    fn late_local_identity_rechecks_the_current_fresh_boss_target() {
+        let (storage, database_path) = temporary_storage("boss-alert-identity");
+        let source = Path::new("output_log_live.txt");
+        let mut parser = EclipticaParser::new();
+        let mut engine = CombatEngine::new();
+        let mut parsed_events = Vec::new();
+        let replay = concat!(
+            "2026.07.23 20:00:00 Debug      -  [Behaviour] Entering Room: Ecliptica - Demo Playtest\n",
+            "2026.07.23 20:00:01 Debug      -  ECLIPTICA - now fighting boss: Astral Sovereign on phase: 0.1\n",
+            "2026.07.23 20:00:02 Debug      -  ownership of Astral Sovereign transferred to Late Local\n",
+        );
+        consume_complete_lines(
+            source,
+            0,
+            replay.as_bytes(),
+            &mut parser,
+            &storage,
+            Some(&mut engine),
+            None,
+            &mut parsed_events,
+        )
+        .unwrap();
+
+        let identity =
+            "2026.07.23 20:00:03 Debug      -  [Behaviour] Initialized PlayerAPI \"Late Local\" is local\n";
+        let (sender, mut receiver) = tokio_mpsc::unbounded_channel();
+        let mut live_updates = PendingBossTargetUpdates::new(source, None);
+        consume_complete_lines(
+            source,
+            replay.len() as u64,
+            identity.as_bytes(),
+            &mut parser,
+            &storage,
+            Some(&mut engine),
+            Some(&mut live_updates),
+            &mut parsed_events,
+        )
+        .unwrap();
+        live_updates.publish(&sender);
+
+        let BossTargetUpdate::Live(observation) =
+            receiver.try_recv().expect("identity should refresh focus")
+        else {
+            panic!("identity refresh should be a live target update");
+        };
+        assert_eq!(observation.target_player, "Late Local");
+        assert_eq!(observation.observed_player.as_deref(), Some("Late Local"));
+        assert!(receiver.try_recv().is_err());
+
+        let stale_identity =
+            "2026.07.23 20:00:48 Debug      -  [Behaviour] Initialized PlayerAPI \"Late Local\" is local\n";
+        let mut stale_updates = PendingBossTargetUpdates::new(source, None);
+        consume_complete_lines(
+            source,
+            (replay.len() + identity.len()) as u64,
+            stale_identity.as_bytes(),
+            &mut parser,
+            &storage,
+            Some(&mut engine),
+            Some(&mut stale_updates),
+            &mut parsed_events,
+        )
+        .unwrap();
+        stale_updates.publish(&sender);
+        assert!(
+            receiver.try_recv().is_err(),
+            "an aging retained target must not become an audible edge"
+        );
+
+        drop(storage);
+        remove_storage_files(&database_path);
+    }
+
+    #[test]
+    fn replay_offset_emits_only_content_appended_to_a_dormant_log() {
+        let (storage, database_path) = temporary_storage("boss-alert-offset");
+        let source = Path::new("output_log_woken.txt");
+        let mut parser = EclipticaParser::new();
+        let mut engine = CombatEngine::new();
+        let mut parsed_events = Vec::new();
+        let old_content = concat!(
+            "2026.07.23 20:00:00 Debug      -  [Behaviour] Entering Room: Ecliptica - Demo Playtest\n",
+            "2026.07.23 20:00:01 Debug      -  [Behaviour] Initialized PlayerAPI \"Local Player\" is local\n",
+            "2026.07.23 20:00:02 Debug      -  ECLIPTICA - now fighting boss: Astral Sovereign on phase: 0.1\n",
+            "2026.07.23 20:00:03 Debug      -  ownership of Astral Sovereign transferred to Local Player\n",
+            "2026.07.23 20:00:03 Debug      -  ownership of Astral Sovereign transferred to Other Player\n",
+        );
+        let appended =
+            "2026.07.23 20:00:04 Debug      -  ownership of Astral Sovereign transferred to Local Player\n";
+        let replayed = format!("{old_content}{appended}");
+        let (sender, mut receiver) = tokio_mpsc::unbounded_channel();
+        let mut pending = PendingBossTargetUpdates::new(source, Some(old_content.len() as u64));
+
+        consume_complete_lines(
+            source,
+            0,
+            replayed.as_bytes(),
+            &mut parser,
+            &storage,
+            Some(&mut engine),
+            Some(&mut pending),
+            &mut parsed_events,
+        )
+        .unwrap();
+        pending.finish_replay(&engine);
+        pending.publish(&sender);
+
+        let BossTargetUpdate::Baseline(Some(baseline)) = receiver
+            .try_recv()
+            .expect("old content should establish a baseline")
+        else {
+            panic!("expected a baseline before appended events");
+        };
+        assert_eq!(baseline.target_player, "Other Player");
+        let BossTargetUpdate::Live(observation) = receiver
+            .try_recv()
+            .expect("the appended target transfer should be live")
+        else {
+            panic!("expected the appended transfer to be live");
+        };
+        assert_eq!(observation.target_player, "Local Player");
+        assert!(receiver.try_recv().is_err());
+
+        drop(storage);
+        remove_storage_files(&database_path);
     }
 }

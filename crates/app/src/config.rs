@@ -107,6 +107,7 @@ pub struct AppConfig {
     pub log_directory: PathBuf,
     pub auto_import_recent_logs: bool,
     pub import_days: u32,
+    pub boss_target_alert_enabled: bool,
     pub launch_minimized: bool,
     pub minimize_to_tray: bool,
     pub stream_token: String,
@@ -123,6 +124,7 @@ impl Default for AppConfig {
             log_directory: default_vrchat_log_directory(),
             auto_import_recent_logs: true,
             import_days: 3,
+            boss_target_alert_enabled: true,
             launch_minimized: false,
             minimize_to_tray: true,
             stream_token: generate_install_token(),
@@ -340,6 +342,47 @@ fn generate_install_token() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_configs_enable_the_boss_target_alert_by_default() {
+        let mut raw = serde_json::to_value(AppConfig::default()).unwrap();
+        raw.as_object_mut()
+            .unwrap()
+            .remove("boss_target_alert_enabled");
+
+        let config: AppConfig = serde_json::from_value(raw).unwrap();
+
+        assert!(config.boss_target_alert_enabled);
+        assert!(serde_json::to_value(config)
+            .unwrap()
+            .get("boss_target_alert_enabled")
+            .is_some_and(serde_json::Value::is_boolean));
+    }
+
+    #[test]
+    fn boss_target_alert_setting_round_trips_on_disk() {
+        let path = std::env::temp_dir().join(format!(
+            "minmaxxer-alert-config-{}-{}.json",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut raw = serde_json::to_value(AppConfig::default()).unwrap();
+        raw.as_object_mut()
+            .unwrap()
+            .remove("boss_target_alert_enabled");
+        fs::write(&path, serde_json::to_vec_pretty(&raw).unwrap()).unwrap();
+
+        let mut config = AppConfig::load(&path).unwrap();
+        assert!(config.boss_target_alert_enabled);
+        config.boss_target_alert_enabled = false;
+        config.save(&path).unwrap();
+
+        assert!(!AppConfig::load(&path).unwrap().boss_target_alert_enabled);
+        fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn legacy_overlay_profiles_inherit_run_context_without_enabling_loadout() {

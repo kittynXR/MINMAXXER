@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod boss_alert;
 mod config;
 mod desktop_overlay;
 mod server;
@@ -63,10 +64,12 @@ fn run() -> Result<()> {
 
     let storage = Arc::new(Storage::open(&database_path)?);
     let (snapshot_tx, snapshot_rx) = watch::channel(EngineSnapshot::default());
+    let (boss_target_tx, boss_target_rx) = tokio::sync::mpsc::unbounded_channel();
     let collector = spawn_collector(
         CollectorSettings::from(&config),
         storage.clone(),
         snapshot_tx,
+        boss_target_tx,
     );
     let shared_config = Arc::new(RwLock::new(config.clone()));
     let (config_tx, config_rx) = watch::channel(config.clone());
@@ -75,6 +78,7 @@ fn run() -> Result<()> {
         return run_headless(
             listener,
             snapshot_rx,
+            boss_target_rx,
             storage,
             shared_config,
             config_path,
@@ -91,6 +95,7 @@ fn run() -> Result<()> {
     let config_path_for_setup = config_path.clone();
     let imports_for_setup = imports_directory.clone();
     let snapshots_for_setup = snapshot_rx.clone();
+    let boss_targets_for_setup = boss_target_rx;
     let updates_for_setup = config_tx.clone();
 
     tauri::Builder::default()
@@ -113,6 +118,10 @@ fn run() -> Result<()> {
                     tracing::error!(%error, "local HTTP/OBS server stopped");
                 }
             });
+            tauri::async_runtime::spawn(boss_alert::monitor(
+                boss_targets_for_setup,
+                shared_config_for_setup.clone(),
+            ));
 
             let origin = format!("http://127.0.0.1:{}", config_for_setup.port);
             let main_url = Url::parse(&origin)?;
@@ -202,6 +211,7 @@ fn run() -> Result<()> {
 fn run_headless(
     listener: TcpListener,
     snapshots: watch::Receiver<EngineSnapshot>,
+    boss_targets: tokio::sync::mpsc::UnboundedReceiver<boss_alert::BossTargetUpdate>,
     storage: Arc<Storage>,
     config: Arc<RwLock<AppConfig>>,
     config_path: std::path::PathBuf,
@@ -215,6 +225,7 @@ fn run_headless(
         .worker_threads(2)
         .thread_name("minmaxxer-runtime")
         .build()?;
+    runtime.spawn(boss_alert::monitor(boss_targets, config.clone()));
     runtime.block_on(server::serve_on(
         ServerState {
             snapshots,

@@ -1643,14 +1643,14 @@
     const dialog = $("#settingsDialog"); if (!dialog) return;
     $("#logPath").value = state.settings.log_path ?? state.settings.logPath ?? state.settings.log_directory ?? "";
     $("#importDays").value = clamp(number(state.settings.import_days, 3), 1, 30);
-    setSwitch($("#autoImportToggle"), state.settings.auto_import_recent_logs ?? true); setSwitch($("#launchMinimizedToggle"), state.settings.launch_minimized ?? false); setSwitch($("#minimizeTrayToggle"), state.settings.minimize_to_tray ?? true); dialog.showModal();
+    setSwitch($("#autoImportToggle"), state.settings.auto_import_recent_logs ?? true); setSwitch($("#bossTargetAlertToggle"), state.settings.boss_target_alert_enabled ?? true); setSwitch($("#launchMinimizedToggle"), state.settings.launch_minimized ?? false); setSwitch($("#minimizeTrayToggle"), state.settings.minimize_to_tray ?? true); dialog.showModal();
   }
 
   function setSwitch(button, active) { if (!button) return; button.classList.toggle("active", active); button.setAttribute("aria-checked", String(active)); }
   function toggleSwitch(button) { setSwitch(button, button.getAttribute("aria-checked") !== "true"); }
 
   async function saveSettings() {
-    const patch = { log_path: $("#logPath").value.trim(), import_days: clamp(Math.round(number($("#importDays").value, 3)), 1, 30), auto_import_recent_logs: $("#autoImportToggle").getAttribute("aria-checked") === "true", launch_minimized: $("#launchMinimizedToggle").getAttribute("aria-checked") === "true", minimize_to_tray: $("#minimizeTrayToggle").getAttribute("aria-checked") === "true" };
+    const patch = { log_path: $("#logPath").value.trim(), import_days: clamp(Math.round(number($("#importDays").value, 3)), 1, 30), auto_import_recent_logs: $("#autoImportToggle").getAttribute("aria-checked") === "true", boss_target_alert_enabled: $("#bossTargetAlertToggle").getAttribute("aria-checked") === "true", launch_minimized: $("#launchMinimizedToggle").getAttribute("aria-checked") === "true", minimize_to_tray: $("#minimizeTrayToggle").getAttribute("aria-checked") === "true" };
     try { await api("/api/settings", { method: "PUT", body: JSON.stringify(patch) }); state.settings = { ...state.settings, ...patch }; $("#settingsDialog").close(); showToast("Settings saved."); }
     catch (_) { text("#settingsStatus", "Service unavailable — changes not applied."); }
   }
@@ -1671,7 +1671,7 @@
     $("#analysisPlayerSelect")?.addEventListener("change", (event) => { const run = selectedAnalysisRun(); if (run) { const context = selectedAnalysisContext(run); state.analysisPlayerByRun[`${run.id}:${context?.id ?? "all-bosses"}`] = event.target.value; } renderAnalysis(); });
     $("#eventRunSelect")?.addEventListener("change", loadEventsForRun); $("#eventSearch")?.addEventListener("input", renderEvents); $("#eventTypeFilter")?.addEventListener("change", renderEvents); $("#strikeOnly")?.addEventListener("change", renderEvents);
     $("#loadMoreEvents")?.addEventListener("click", () => { state.eventLimit += 80; renderEvents(); }); $("#copyEventsButton")?.addEventListener("click", async () => { await copyText(visibleEvents().map((event) => `${event.time}\t${event.type}\t${event.source}\t${event.action}\t${event.target}\t${event.amount}`).join("\n")); showToast("Visible events copied as tab-separated text."); });
-    $("#settingsButton")?.addEventListener("click", openSettings); ["#autoImportToggle", "#launchMinimizedToggle", "#minimizeTrayToggle"].forEach((selector) => $(selector)?.addEventListener("click", (event) => toggleSwitch(event.currentTarget))); $("#saveSettings")?.addEventListener("click", saveSettings);
+    $("#settingsButton")?.addEventListener("click", openSettings); ["#autoImportToggle", "#bossTargetAlertToggle", "#launchMinimizedToggle", "#minimizeTrayToggle"].forEach((selector) => $(selector)?.addEventListener("click", (event) => toggleSwitch(event.currentTarget))); $("#saveSettings")?.addEventListener("click", saveSettings);
     $("#detectLogButton")?.addEventListener("click", () => { $("#logPath").value = "%USERPROFILE%\\AppData\\LocalLow\\VRChat\\VRChat"; text("#settingsStatus", "Default VRChat location selected."); });
     window.addEventListener("resize", debounce(() => { drawLiveChart(); drawCompareChart(); }, 120));
     document.addEventListener("visibilitychange", () => { if (!document.hidden) renderAll(); });

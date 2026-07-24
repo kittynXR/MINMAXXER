@@ -850,6 +850,19 @@ mod tests {
     }
 
     #[test]
+    fn settings_ui_wires_the_native_boss_target_alert_toggle() {
+        assert!(INDEX_HTML.contains("id=\"bossTargetAlertToggle\""));
+        assert!(INDEX_HTML.contains("Boss-target sound alert"));
+        assert!(APP_JS.contains("state.settings.boss_target_alert_enabled ?? true"));
+        assert!(APP_JS.contains(
+            "boss_target_alert_enabled: $(\"#bossTargetAlertToggle\").getAttribute(\"aria-checked\") === \"true\""
+        ));
+        assert!(APP_JS.contains(
+            "\"#autoImportToggle\", \"#bossTargetAlertToggle\", \"#launchMinimizedToggle\""
+        ));
+    }
+
+    #[test]
     fn legacy_obs_only_studio_profile_migrates_before_backend_becomes_canonical() {
         let hydrate_start = APP_JS
             .find("function applySavedStudioOptions")

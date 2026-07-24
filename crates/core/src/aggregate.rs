@@ -72,6 +72,17 @@ pub struct FocusSignal {
     pub source_note: String,
 }
 
+/// A fresh exact-boss focus observation plus the local identity known at that log line. The app
+/// consumes this discrete signal for audio alerts so rapid ownership changes cannot be collapsed
+/// by the latest-value HUD snapshot channel.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BossTargetObservation {
+    pub focus: FocusSignal,
+    pub observed_player: Option<String>,
+    pub encounter_name: String,
+    pub encounter_started_at: Option<NaiveDateTime>,
+}
+
 /// Live position within Ecliptica's 13-boss run. `boss_number` describes the upcoming boss while
 /// a stage is active and the current boss once its BossStarted line arrives. A recovered mid-log
 /// value remains labelled by `boss_number_inferred` until an authoritative special-stage marker
@@ -255,6 +266,34 @@ impl CombatEngine {
     }
 
     pub fn ingest(&mut self, event: GameEvent) {
+        let _ = self.ingest_inner(event);
+    }
+
+    pub fn ingest_with_boss_target_observation(
+        &mut self,
+        event: GameEvent,
+    ) -> Option<BossTargetObservation> {
+        self.ingest_inner(event)
+    }
+
+    /// Returns the retained exact-boss target candidate without requiring it to be fresh. Alert
+    /// consumers use this only to synchronize silently after a log replay or source reset.
+    pub fn boss_target_baseline(&self) -> Option<BossTargetObservation> {
+        if !self.encounter.active || self.encounter.kind != "boss" {
+            return None;
+        }
+        Some(BossTargetObservation {
+            focus: self.focus.clone()?,
+            observed_player: self.observed_player.clone(),
+            encounter_name: self.encounter.name.clone(),
+            encounter_started_at: self.encounter.started_at,
+        })
+    }
+
+    fn ingest_inner(&mut self, event: GameEvent) -> Option<BossTargetObservation> {
+        let event_timestamp = event.timestamp;
+        let local_identity_changed = event.kind == EventKind::LocalPlayerIdentified;
+        let mut focus_changed = false;
         self.version += 1;
         self.last_event_at = Some(event.timestamp);
         if event.player.is_some() {
@@ -382,7 +421,7 @@ impl CombatEngine {
             }
             EventKind::DamageDealt => self.add_outgoing(&event),
             EventKind::DamageTaken => self.add_incoming(&event),
-            EventKind::OwnershipTransferred => self.observe_focus(&event),
+            EventKind::OwnershipTransferred => focus_changed = self.observe_focus(&event),
             _ => {}
         }
 
@@ -390,6 +429,23 @@ impl CombatEngine {
             self.recent_events.pop_front();
         }
         self.recent_events.push_back(event);
+
+        if !focus_changed && !local_identity_changed {
+            return None;
+        }
+        if !self.encounter.active || self.encounter.kind != "boss" {
+            return None;
+        }
+        let focus = self.current_focus_at(Some(event_timestamp))?;
+        if !matches!(focus.confidence.as_str(), "possible" | "likely") {
+            return None;
+        }
+        Some(BossTargetObservation {
+            focus,
+            observed_player: self.observed_player.clone(),
+            encounter_name: self.encounter.name.clone(),
+            encounter_started_at: self.encounter.started_at,
+        })
     }
 
     pub fn snapshot(&self) -> EngineSnapshot {
@@ -852,19 +908,19 @@ impl CombatEngine {
         attacks
     }
 
-    fn observe_focus(&mut self, event: &GameEvent) {
+    fn observe_focus(&mut self, event: &GameEvent) -> bool {
         if !self.encounter.active || self.encounter.kind != "boss" {
-            return;
+            return false;
         }
         let (Some(entity), Some(player)) = (event.entity.as_ref(), event.target.as_ref()) else {
-            return;
+            return false;
         };
         let entity_name_key = entity_key(entity);
         let boss_key = entity_key(&self.encounter.name);
         // Sub-entities such as Fly, M41DPillar, M41DTower, and GravetenderOrb transfer ownership
         // independently. Symmetric substring matching turns those mechanics into false targets.
         if entity_name_key.is_empty() || boss_key.is_empty() || entity_name_key != boss_key {
-            return;
+            return false;
         }
         self.focus = Some(FocusSignal {
             player: player.clone(),
@@ -879,6 +935,7 @@ impl CombatEngine {
                 "Exact boss network ownership; a useful target proxy, not authoritative hate/aggro."
                     .to_owned(),
         });
+        true
     }
 
     fn corroborate_focus(&mut self, event: &GameEvent) {

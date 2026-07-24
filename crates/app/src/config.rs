@@ -5,6 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 pub const DEFAULT_PORT: u16 = 49_321;
+pub const OVERLAY_SETTINGS_SCHEMA_VERSION: u8 = 4;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -91,7 +92,7 @@ impl Default for OverlayProfile {
             show_focus: true,
             show_graph: true,
             show_survival: true,
-            show_telemetry: true,
+            show_telemetry: false,
             show_loadout: false,
             anonymize_players: false,
         }
@@ -101,6 +102,7 @@ impl Default for OverlayProfile {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppConfig {
+    pub overlay_schema_version: u8,
     pub port: u16,
     pub log_directory: PathBuf,
     pub auto_import_recent_logs: bool,
@@ -116,6 +118,7 @@ pub struct AppConfig {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
+            overlay_schema_version: OVERLAY_SETTINGS_SCHEMA_VERSION,
             port: DEFAULT_PORT,
             log_directory: default_vrchat_log_directory(),
             auto_import_recent_logs: true,
@@ -152,6 +155,7 @@ impl AppConfig {
             config.overlay_profiles.push(OverlayProfile::default());
             migrated = true;
         }
+        migrated |= config.migrate_overlay_schema(&raw);
         migrated |= config.inherit_legacy_run_context_visibility(&raw);
         migrated |= config.normalize_overlay_profiles();
         config.validate()?;
@@ -159,6 +163,25 @@ impl AppConfig {
             config.save(path)?;
         }
         Ok(config)
+    }
+
+    fn migrate_overlay_schema(&mut self, raw: &serde_json::Value) -> bool {
+        let persisted_version = raw
+            .get("overlay_schema_version")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or_default();
+        if persisted_version >= u64::from(OVERLAY_SETTINGS_SCHEMA_VERSION) {
+            return false;
+        }
+
+        // v0.4 shipped these unavailable placeholders enabled by default. Treat every
+        // pre-schema-4 profile as that old default exactly once; schema-4 profiles can
+        // still opt back in explicitly from Overlay Studio.
+        for profile in &mut self.overlay_profiles {
+            profile.show_telemetry = false;
+        }
+        self.overlay_schema_version = OVERLAY_SETTINGS_SCHEMA_VERSION;
+        true
     }
 
     fn inherit_legacy_run_context_visibility(&mut self, raw: &serde_json::Value) -> bool {
@@ -327,8 +350,39 @@ mod tests {
         assert!(profile.show_boss_number);
         assert!(profile.show_graph);
         assert!(profile.show_survival);
-        assert!(profile.show_telemetry);
+        assert!(!profile.show_telemetry);
         assert!(!profile.show_loadout);
+    }
+
+    #[test]
+    fn pre_v4_overlay_profiles_disable_unavailable_telemetry_once() {
+        let mut raw = serde_json::to_value(AppConfig::default()).unwrap();
+        raw.as_object_mut()
+            .unwrap()
+            .remove("overlay_schema_version");
+        raw["overlay_profiles"][0]["show_telemetry"] = serde_json::json!(true);
+
+        let mut config: AppConfig = serde_json::from_value(raw.clone()).unwrap();
+        assert!(config.overlay_profiles[0].show_telemetry);
+        assert!(config.migrate_overlay_schema(&raw));
+        assert_eq!(
+            config.overlay_schema_version,
+            OVERLAY_SETTINGS_SCHEMA_VERSION
+        );
+        assert!(!config.overlay_profiles[0].show_telemetry);
+
+        let migrated_raw = serde_json::to_value(&config).unwrap();
+        assert!(!config.migrate_overlay_schema(&migrated_raw));
+    }
+
+    #[test]
+    fn schema_v4_preserves_explicit_unavailable_telemetry_opt_in() {
+        let mut raw = serde_json::to_value(AppConfig::default()).unwrap();
+        raw["overlay_profiles"][0]["show_telemetry"] = serde_json::json!(true);
+
+        let mut config: AppConfig = serde_json::from_value(raw.clone()).unwrap();
+        assert!(!config.migrate_overlay_schema(&raw));
+        assert!(config.overlay_profiles[0].show_telemetry);
     }
 
     #[test]

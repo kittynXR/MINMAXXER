@@ -1,4 +1,4 @@
-use crate::config::AppConfig;
+use crate::config::{AppConfig, OVERLAY_SETTINGS_SCHEMA_VERSION};
 use crate::storage::Storage;
 use crate::tailer::{CollectorHandle, CollectorSettings};
 use crate::vr_overlay::VrOverlayStatus;
@@ -277,6 +277,7 @@ async fn update_settings(
     let mut merged = serde_json::to_value(&current).unwrap_or_else(|_| json!({}));
     apply_compatibility_aliases(&mut merged, &patch);
     deep_merge(&mut merged, patch);
+    merged["overlay_schema_version"] = json!(OVERLAY_SETTINGS_SCHEMA_VERSION);
     let next: AppConfig = match serde_json::from_value(merged) {
         Ok(config) => config,
         Err(error) => return error_response(StatusCode::BAD_REQUEST, error.to_string()),
@@ -424,6 +425,7 @@ fn apply_compatibility_aliases(base: &mut Value, patch: &Value) {
     let Some(patch) = patch.as_object() else {
         return;
     };
+    base["overlay_schema_version"] = json!(OVERLAY_SETTINGS_SCHEMA_VERSION);
     if let Some(value) = patch
         .get("desktop_overlay_enabled")
         .and_then(Value::as_bool)
@@ -497,12 +499,14 @@ fn apply_compatibility_aliases(base: &mut Value, patch: &Value) {
                 }
                 if let Some(show) = object.get("show").and_then(Value::as_array) {
                     let has = |name: &str| show.iter().any(|value| value.as_str() == Some(name));
-                    let legacy_run_context = object
+                    let current_schema = object
                         .get("schema_version")
                         .or_else(|| object.get("ui"))
                         .and_then(Value::as_u64)
-                        != Some(3)
-                        && has("encounter");
+                        .is_some_and(|version| {
+                            version >= u64::from(OVERLAY_SETTINGS_SCHEMA_VERSION)
+                        });
+                    let legacy_run_context = !current_schema && has("encounter");
                     profile["show_dps"] = Value::Bool(has("dps"));
                     profile["show_damage"] = Value::Bool(has("damage"));
                     profile["show_incoming"] = Value::Bool(has("incoming"));
@@ -514,7 +518,7 @@ fn apply_compatibility_aliases(base: &mut Value, patch: &Value) {
                     profile["show_focus"] = Value::Bool(has("focus"));
                     profile["show_graph"] = Value::Bool(has("graph"));
                     profile["show_survival"] = Value::Bool(has("survival"));
-                    profile["show_telemetry"] = Value::Bool(has("telemetry"));
+                    profile["show_telemetry"] = Value::Bool(current_schema && has("telemetry"));
                     profile["show_loadout"] = Value::Bool(has("loadout"));
                 }
             }
@@ -543,12 +547,12 @@ fn apply_compatibility_aliases(base: &mut Value, patch: &Value) {
             }
             if let Some(show) = object.get("show").and_then(Value::as_array) {
                 let has = |name: &str| show.iter().any(|value| value.as_str() == Some(name));
-                let legacy_run_context = object
+                let current_schema = object
                     .get("schema_version")
                     .or_else(|| object.get("ui"))
                     .and_then(Value::as_u64)
-                    != Some(3)
-                    && has("encounter");
+                    .is_some_and(|version| version >= u64::from(OVERLAY_SETTINGS_SCHEMA_VERSION));
+                let legacy_run_context = !current_schema && has("encounter");
                 let shows_outgoing_metric = has("dps") || has("damage");
                 let shows_player_metric = shows_outgoing_metric || has("incoming");
                 base["vr_overlay"]["show_rolling_dps"] = Value::Bool(has("dps"));
@@ -900,13 +904,28 @@ mod tests {
             .expect("VR status rendering should follow the URL builder");
         let url_builder = &APP_JS[url_start..url_end];
 
-        assert!(APP_JS.contains("const OVERLAY_SETTINGS_VERSION = 3"));
+        assert!(APP_JS.contains("const OVERLAY_SETTINGS_VERSION = 4"));
         assert!(url_builder.contains("params.set(\"ui\", OVERLAY_SETTINGS_VERSION)"));
         assert!(options_parser.contains("params.get(\"ui\") !== String(OVERLAY_SETTINGS_VERSION)"));
         assert!(options_parser.contains("params.has(\"show\")"));
         assert!(options_parser.contains("parsedShow.includes(\"encounter\")"));
+        assert!(options_parser.contains("parsedShow.splice(telemetryIndex, 1)"));
         assert!(options_parser.contains("parsedShow.push(\"phase\")"));
         assert!(options_parser.contains("parsedShow.push(\"boss\")"));
+    }
+
+    #[test]
+    fn studio_starts_at_actual_pixels_and_hides_unavailable_placeholders() {
+        assert!(INDEX_HTML.contains("id=\"previewOneToOne\" class=\"active\""));
+        assert!(INDEX_HTML.contains("class=\"overlay-stage one-to-one\""));
+        assert!(INDEX_HTML.contains("value=\"telemetry\"><span>"));
+        assert!(!INDEX_HTML.contains("value=\"telemetry\" checked"));
+        assert!(APP_JS.contains("restoredShow.delete(\"telemetry\")"));
+        assert!(APP_JS.contains("preview.style.transform = oneToOne ? \"scale(1)\""));
+        assert!(STYLE_CSS.contains(".overlay-stage.one-to-one"));
+        assert!(STYLE_CSS.contains("max-width:2400px"));
+        assert!(STYLE_CSS.contains("height:min(722px"));
+        assert!(STYLE_CSS.contains("z-index:2;grid-area:1/1"));
     }
 
     #[test]
@@ -967,15 +986,17 @@ mod tests {
         assert_eq!(legacy["vr_overlay"]["show_boss_number"], true);
         assert_eq!(legacy["vr_overlay"]["show_loadout"], false);
 
-        let explicit = apply(Some(3), vec!["encounter"]);
+        let explicit = apply(Some(4), vec!["encounter"]);
         assert_eq!(profile(&explicit)["show_phase"], false);
         assert_eq!(profile(&explicit)["show_boss_number"], false);
+        assert_eq!(profile(&explicit)["show_telemetry"], false);
         assert_eq!(profile(&explicit)["show_loadout"], false);
         assert_eq!(explicit["vr_overlay"]["show_phase"], false);
         assert_eq!(explicit["vr_overlay"]["show_boss_number"], false);
         assert_eq!(explicit["vr_overlay"]["show_loadout"], false);
+        assert_eq!(explicit["overlay_schema_version"], 4);
 
-        let loadout = apply(Some(3), vec!["encounter", "phase", "boss", "loadout"]);
+        let loadout = apply(Some(4), vec!["encounter", "phase", "boss", "loadout"]);
         assert_eq!(profile(&loadout)["show_phase"], true);
         assert_eq!(profile(&loadout)["show_boss_number"], true);
         assert_eq!(profile(&loadout)["show_loadout"], true);
@@ -983,7 +1004,7 @@ mod tests {
         assert_eq!(loadout["vr_overlay"]["show_boss_number"], true);
         assert_eq!(loadout["vr_overlay"]["show_loadout"], true);
 
-        let context_only = apply(Some(3), vec!["phase", "boss", "hits", "focus"]);
+        let context_only = apply(Some(4), vec!["phase", "boss", "hits", "focus"]);
         assert_eq!(profile(&context_only)["show_dps"], false);
         assert_eq!(profile(&context_only)["show_damage"], false);
         assert_eq!(context_only["vr_overlay"]["show_players"], false);
@@ -991,12 +1012,18 @@ mod tests {
         assert_eq!(context_only["vr_overlay"]["show_rolling_dps"], false);
         assert_eq!(context_only["vr_overlay"]["show_total_damage"], false);
 
-        let incoming_only = apply(Some(3), vec!["incoming"]);
+        let incoming_only = apply(Some(4), vec!["incoming"]);
         assert_eq!(incoming_only["vr_overlay"]["show_incoming"], true);
         assert_eq!(incoming_only["vr_overlay"]["show_players"], true);
         assert_eq!(incoming_only["vr_overlay"]["show_attacks"], false);
         assert_eq!(incoming_only["vr_overlay"]["show_rolling_dps"], false);
         assert_eq!(incoming_only["vr_overlay"]["show_total_damage"], false);
+
+        let old_telemetry = apply(Some(3), vec!["telemetry"]);
+        assert_eq!(profile(&old_telemetry)["show_telemetry"], false);
+
+        let opted_in_telemetry = apply(Some(4), vec!["telemetry"]);
+        assert_eq!(profile(&opted_in_telemetry)["show_telemetry"], true);
     }
 
     #[test]

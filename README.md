@@ -20,13 +20,13 @@ All application and HUD surfaces are dark-only. The Windows title bar, WebView p
 
 Ecliptica directly logs a numeric run-progress value, but not the named difficulty band. MINMAXXER maps it with the documented, unofficial [EACT five-band convention](https://eact-doc.rtail.dev/?lang=en#phases): `0.0–<0.2` PRIME, `0.2–<0.4` PENUMBRA, `0.4–<0.6` ANTUMBRA, `0.6–<0.8` UMBRA, and `0.8–1.0` ECLIPSE. The half-open endpoint handling is MINMAXXER's convention, not an official world API contract. At progress `1.0`, a matching final Bringer-stage marker is presented as **EYE OF THE ECLIPSE**, corroborated by the community [boss reference](https://wikiwiki.jp/ecliptica/%E3%83%9C%E3%82%B9), while retaining the ECLIPSE numeric band. Boss ordinals counted from a run observed at progress zero are exact, as is boss 13 when the final Bringer marker identifies it; other mid-run recovery uses audited progress anchors and labels the estimate `INFERRED`/`~`.
 
-Ecliptica's current logs do **not** expose other players' damage to one client, player/enemy HP, healing, shields, critical hits, blocks, misses, authoritative kills, applied/removed buff and debuff state, gem balances/spending, shop item identities and stack counts, or the current song. Session load/save markers are checkpoints, not item-purchase records, so MINMAXXER does not construct a loadout from them. MINMAXXER never invents unavailable values. See [Log telemetry](docs/LOG_TELEMETRY.md) for the full capability matrix.
+Ecliptica's current logs do **not** expose other players' damage to one client, player/enemy HP, healing, shields, critical hits, blocks, misses, authoritative kills, applied/removed buff and debuff state, gem balances/spending, shop item identities and stack counts, or the current song. Session load/save markers are checkpoints, not item-purchase records, so MINMAXXER does not construct a loadout from them. MINMAXXER never invents unavailable values. Unsupported placeholders are hidden on every default HUD so they consume no live space; the web overlay can show an optional reminder row. See [Log telemetry](docs/LOG_TELEMETRY.md) for the full capability matrix.
 
 ## Run it
 
 1. Start `minmaxxer.exe`. It automatically finds `%USERPROFILE%\AppData\LocalLow\VRChat\VRChat` and imports recent logs.
 2. Start VRChat normally. The live display updates as Ecliptica writes complete log lines.
-3. Open **Overlay studio** to choose a landscape or portrait HUD, colors, scale, visible sections, recent-hit count, and the `BOSS TARGET?` item.
+3. Open **Overlay studio** to choose a landscape or portrait HUD, colors, scale, visible sections, recent-hit count, and the `BOSS TARGET?` item. The preview starts at **1:1 actual pixels** for readable large-screen inspection; choose **Fit** when a scaled overview is more useful.
 
 The portable release executable statically links the Visual C++ runtime. Its only desktop UI prerequisite is the Microsoft Edge WebView2 runtime included with current Windows 10/11 installations. SteamVR is only initialized when its overlay is enabled. Published builds are currently unsigned, so Windows SmartScreen may ask for confirmation on first launch.
 
@@ -52,7 +52,7 @@ Enable **Desktop overlay** in Overlay studio. The click-through WebView follows 
 
 ### SteamVR overlay
 
-Enable **VR overlay** while SteamVR is running. The dense 1024 × 512 HUD is rendered directly into a reusable RGBA buffer and uploaded only when content changes, capped at 4 Hz. Its HMD-relative X/Y/Z position, width, curvature, and opacity are persisted in settings. Compositor presentation and transform values are cached so ordinary content redraws do not repeatedly rewrite them.
+Enable **VR overlay** while SteamVR is running. The dense 1024 × 512 HUD is rendered directly into a reusable RGBA buffer and uploaded only when content changes, capped at 4 Hz. The full lower area is dedicated to the larger DPS graph and two five-row combat feeds; unavailable telemetry consumes no native panel space. Its HMD-relative X/Y/Z position, width, curvature, and opacity are persisted in settings. Compositor presentation and transform values are cached so ordinary content redraws do not repeatedly rewrite them.
 
 Turn on **Grab & move overlay** to unlock placement. Squeeze the right grip to attach the HUD, move it naturally, and release to place it; the overlay remains available for another grab until the toggle is turned off. Turning the toggle off immediately finalizes the current placement and locks the HUD against accidental movement. Haptics acknowledge grab and placement. A controller-placed transform survives redraws and SteamVR reconnects for the current app session; use the saved X/Y/Z controls for placement that must survive an app restart. Hardware presentation still needs to be checked on each SteamVR/runtime combination.
 
@@ -84,6 +84,6 @@ cargo build --release -p minmaxxer
 ./scripts/build-portable.ps1
 ```
 
-The normal executable is written to `target\release\minmaxxer.exe`. The portable release script uses a clean isolated target, statically links the MSVC runtime, strips local build paths, and writes `dist\MINMAXXER-v0.4.0-windows-x64.exe`. Run the local server without the desktop WebView with `minmaxxer.exe --headless`.
+The normal executable is written to `target\release\minmaxxer.exe`. The portable release script uses a clean isolated target, statically links the MSVC runtime, strips local build paths, and writes `dist\MINMAXXER-v0.4.1-windows-x64.exe`. Run the local server without the desktop WebView with `minmaxxer.exe --headless`.
 
 The code is split into a dependency-light parser/analytics crate and a Windows app crate. More detail is in [Architecture](docs/ARCHITECTURE.md).

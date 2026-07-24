@@ -18,7 +18,7 @@
     amber: ["#ffc45c", "255,196,92"], rose: ["#ff719a", "255,113,154"]
   };
   const titles = { live: "LIVE ENCOUNTER", runs: "RUN HISTORY", compare: "COMPARE RUNS", analysis: "DEEP ANALYSIS", events: "EVENT EXPLORER", overlay: "OVERLAY STUDIO" };
-  const OVERLAY_SETTINGS_VERSION = 3;
+  const OVERLAY_SETTINGS_VERSION = 4;
 
   const state = {
     live: null,
@@ -1334,13 +1334,16 @@
     const params = new URLSearchParams(search); const hasShow = params.has("show"); const showRaw = params.get("show") ?? "";
     const hitMode = ["hits", "recent_hits"].includes(params.get("mode"));
     const supported = ["dps", "damage", "incoming", "encounter", "phase", "boss", "hits", "focus", "graph", "survival", "telemetry", "loadout"];
-    const parsedShow = hasShow ? showRaw.split(",").map((item) => item === "recent_hits" ? "hits" : item).filter((item) => supported.includes(item)) : hitMode ? ["hits", "focus", "phase", "boss", "survival"] : ["dps", "damage", "incoming", "encounter", "phase", "boss", "hits", "focus", "graph", "survival", "telemetry"];
-    if (hasShow && params.get("ui") !== String(OVERLAY_SETTINGS_VERSION) && parsedShow.includes("encounter")) {
-      if (!parsedShow.includes("phase")) parsedShow.push("phase");
-      if (!parsedShow.includes("boss")) parsedShow.push("boss");
-      if (!parsedShow.includes("graph")) parsedShow.push("graph");
-      if (!parsedShow.includes("survival")) parsedShow.push("survival");
-      if (!parsedShow.includes("telemetry")) parsedShow.push("telemetry");
+    const parsedShow = hasShow ? showRaw.split(",").map((item) => item === "recent_hits" ? "hits" : item).filter((item) => supported.includes(item)) : hitMode ? ["hits", "focus", "phase", "boss", "survival"] : ["dps", "damage", "incoming", "encounter", "phase", "boss", "hits", "focus", "graph", "survival"];
+    if (hasShow && params.get("ui") !== String(OVERLAY_SETTINGS_VERSION)) {
+      const telemetryIndex = parsedShow.indexOf("telemetry");
+      if (telemetryIndex >= 0) parsedShow.splice(telemetryIndex, 1);
+      if (parsedShow.includes("encounter")) {
+        if (!parsedShow.includes("phase")) parsedShow.push("phase");
+        if (!parsedShow.includes("boss")) parsedShow.push("boss");
+        if (!parsedShow.includes("graph")) parsedShow.push("graph");
+        if (!parsedShow.includes("survival")) parsedShow.push("survival");
+      }
     }
     const requestedLayout = params.get("layout") || (hitMode ? "portrait" : "landscape");
     return {
@@ -1488,7 +1491,9 @@
     $("#overlayStage").dataset.orientation = options.layout;
     $(".stage-size", $("#overlayStage")).textContent = portrait ? "720 × 1280" : "1280 × 720";
     text("#obsResolutionHint", `${portrait ? "Portrait · set the Browser Source to 720 × 1280" : "Landscape · set the Browser Source to 1280 × 720"}`);
-    if ($("#previewFit").classList.contains("active")) preview.style.transform = `scale(${fitScale})`;
+    const oneToOne = $("#previewOneToOne").classList.contains("active");
+    $("#overlayStage").classList.toggle("one-to-one", oneToOne);
+    preview.style.transform = oneToOne ? "scale(1)" : `scale(${fitScale})`;
     $("#obsUrl").value = overlayUrl(options); renderCombatOverlay($("#studioOverlayPreview"), state.live, { ...options, scale: 100, statusCards: false });
     storeStudioOptions(options);
     renderVrStatus();
@@ -1512,12 +1517,13 @@
     if (profile.show_focus) show.push("focus");
     if (profile.show_graph ?? true) show.push("graph");
     if (profile.show_survival ?? true) show.push("survival");
-    if (profile.show_telemetry ?? true) show.push("telemetry");
+    if (profile.show_telemetry ?? false) show.push("telemetry");
     if (profile.show_loadout) show.push("loadout");
     return {
       profile: String(profile.id || requested), layout: streamLayout(profile.layout || "landscape"), theme: String(profile.theme || "void"), accent: profile.accent === "#8ff0cf" ? "mint" : String(profile.accent || "cyan"),
       rows: number(profile.rows, 5), hitRows: number(profile.recent_hit_rows ?? profile.recentHitRows, 5), scale: number(profile.scale, 1) * 100,
-      bg: number(desktop.opacity, .94) * 100, show, schemaVersion: OVERLAY_SETTINGS_VERSION
+      bg: number(desktop.opacity, .94) * 100, show,
+      schemaVersion: number(state.settings?.overlay_schema_version ?? state.settings?.overlaySchemaVersion, OVERLAY_SETTINGS_VERSION)
     };
   }
 
@@ -1536,8 +1542,9 @@
     if (Array.isArray(saved.show)) {
       const restoredShow = new Set(saved.show);
       if (number(saved.schemaVersion, 1) < OVERLAY_SETTINGS_VERSION && restoredShow.has("encounter")) {
-        restoredShow.add("phase"); restoredShow.add("boss"); restoredShow.add("graph"); restoredShow.add("survival"); restoredShow.add("telemetry");
+        restoredShow.add("phase"); restoredShow.add("boss"); restoredShow.add("graph"); restoredShow.add("survival");
       }
+      if (number(saved.schemaVersion, 1) < 4) restoredShow.delete("telemetry");
       $$(".show-options input").forEach((input) => { input.checked = !input.disabled && restoredShow.has(input.value); });
     }
     if (migrateLocal || retryLocal) {
@@ -1608,8 +1615,8 @@
     $("#vrGrabToggle")?.addEventListener("click", (event) => setVrGrabMode(event.currentTarget));
     $("#saveVrPlacement")?.addEventListener("click", saveVrPlacement);
     $("#resetVrPlacement")?.addEventListener("click", () => { hydrateVrControls({ x:.30, y:.08, z:-1.05, width_m:.86, opacity:1, controller_grab_enabled:false }); showToast("Default VR placement loaded. Apply to save it."); });
-    $("#previewFit")?.addEventListener("click", () => { $("#studioOverlayPreview").style.transform = `scale(${readStudioOptions().layout === "portrait" ? .4 : .46})`; $("#previewFit").classList.add("active"); $("#previewOneToOne").classList.remove("active"); });
-    $("#previewOneToOne")?.addEventListener("click", () => { $("#studioOverlayPreview").style.transform = "scale(1)"; $("#previewOneToOne").classList.add("active"); $("#previewFit").classList.remove("active"); });
+    $("#previewFit")?.addEventListener("click", () => { $("#previewFit").classList.add("active"); $("#previewOneToOne").classList.remove("active"); renderStudioPreview(); });
+    $("#previewOneToOne")?.addEventListener("click", () => { $("#previewOneToOne").classList.add("active"); $("#previewFit").classList.remove("active"); renderStudioPreview(); });
   }
 
   function showToast(message, error = false) {

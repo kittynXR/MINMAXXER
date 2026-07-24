@@ -28,6 +28,8 @@ This capability audit is based on the VRChat logs from July 21, 2026 and the Ecl
 
 ## Not present in the audited logs
 
+These fields are omitted from default OBS, desktop, and native VR HUDs so they consume no live space. Overlay Studio can opt into a compact browser-only reminder row that labels them `NOT LOGGED`.
+
 - Remote-player damage attribution from a single client's log.
 - Outgoing ability/action names. `STRIKE` and `NON-STRIKE` are the only logged local damage categories, not ability names.
 - Healing or healer attribution.

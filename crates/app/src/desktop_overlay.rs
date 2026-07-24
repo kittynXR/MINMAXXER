@@ -1,4 +1,6 @@
-use crate::config::{AppConfig, DesktopOverlaySettings, OverlayProfile};
+use crate::config::{
+    AppConfig, DesktopOverlaySettings, OverlayProfile, OVERLAY_SETTINGS_SCHEMA_VERSION,
+};
 use anyhow::{Context, Result};
 use std::sync::mpsc;
 use std::thread;
@@ -193,9 +195,10 @@ fn overlay_url(origin: &Url, runtime: &DesktopOverlayRuntimeConfig) -> Url {
     let mut url = origin.clone();
     url.set_path("/overlay");
     url.set_query(None);
+    let schema_version = OVERLAY_SETTINGS_SCHEMA_VERSION.to_string();
     url.query_pairs_mut()
         .append_pair("surface", "desktop")
-        .append_pair("ui", "3")
+        .append_pair("ui", &schema_version)
         .append_pair("profile", renderer_profile)
         .append_pair("layout", layout)
         .append_pair("theme", theme)
@@ -314,7 +317,7 @@ mod tests {
         let url = overlay_url(&Url::parse("http://127.0.0.1:49321").unwrap(), &runtime);
         let query: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
         let show: std::collections::HashSet<_> = query.get("show").unwrap().split(',').collect();
-        assert_eq!(query.get("ui").map(String::as_str), Some("3"));
+        assert_eq!(query.get("ui").map(String::as_str), Some("4"));
         assert_eq!(query.get("profile").map(String::as_str), Some("broadcast"));
         assert_eq!(query.get("layout").map(String::as_str), Some("landscape"));
         assert_eq!(query.get("rows").map(String::as_str), Some("2"));
@@ -327,8 +330,23 @@ mod tests {
         assert!(show.contains("focus"));
         assert!(show.contains("graph"));
         assert!(show.contains("survival"));
-        assert!(show.contains("telemetry"));
+        assert!(!show.contains("telemetry"));
         assert!(!show.contains("loadout"));
+    }
+
+    #[test]
+    fn desktop_url_includes_unavailable_telemetry_only_after_opt_in() {
+        let mut config = AppConfig::default();
+        config.overlay_profiles[0].show_telemetry = true;
+        let runtime = DesktopOverlayRuntimeConfig::from_app_config(&config);
+        let url = overlay_url(&Url::parse("http://127.0.0.1:49321").unwrap(), &runtime);
+        let show = url
+            .query_pairs()
+            .find(|(key, _)| key == "show")
+            .map(|(_, value)| value.into_owned())
+            .unwrap();
+
+        assert!(show.split(',').any(|item| item == "telemetry"));
     }
 
     #[test]

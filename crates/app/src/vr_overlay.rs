@@ -1255,12 +1255,11 @@ const VIOLET: Color = Color(177, 123, 255, 255);
 const ORANGE: Color = Color(255, 170, 78, 255);
 const RED: Color = Color(255, 101, 120, 255);
 const GREEN: Color = Color(103, 232, 166, 255);
-const UNAVAILABLE_TELEMETRY: [(&str, &str); 4] = [
-    ("HP", "NOT LOGGED"),
-    ("HEALING", "NOT LOGGED"),
-    ("GEMS", "NOT LOGGED"),
-    ("SONG", "NOT LOGGED"),
-];
+
+const LIVE_PANEL_Y: i32 = 150;
+const LIVE_PANEL_HEIGHT: i32 = 346;
+const FEED_ROW_HEIGHT: i32 = 56;
+const FEED_ROW_STEP: i32 = 59;
 
 fn render_frame(
     font: &Font,
@@ -1326,10 +1325,39 @@ fn render_frame(
         940,
     );
 
-    draw_dps_panel(font, glyphs, pixels, snapshot, settings, 24, 150, 310, 288);
-    draw_outgoing_feed(font, glyphs, pixels, snapshot, settings, 346, 150, 326, 288);
-    draw_incoming_feed(font, glyphs, pixels, snapshot, settings, 684, 150, 316, 288);
-    draw_unavailable_strip(font, glyphs, pixels);
+    draw_dps_panel(
+        font,
+        glyphs,
+        pixels,
+        snapshot,
+        settings,
+        24,
+        LIVE_PANEL_Y,
+        310,
+        LIVE_PANEL_HEIGHT,
+    );
+    draw_outgoing_feed(
+        font,
+        glyphs,
+        pixels,
+        snapshot,
+        settings,
+        346,
+        LIVE_PANEL_Y,
+        326,
+        LIVE_PANEL_HEIGHT,
+    );
+    draw_incoming_feed(
+        font,
+        glyphs,
+        pixels,
+        snapshot,
+        settings,
+        684,
+        LIVE_PANEL_Y,
+        316,
+        LIVE_PANEL_HEIGHT,
+    );
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1469,7 +1497,7 @@ fn draw_dps_panel(
     let graph_x = x + 15;
     let graph_y = y + 50;
     let graph_width = width - 30;
-    let graph_height = 153;
+    let graph_height = 207;
     fill_rounded_rect(
         pixels,
         graph_x,
@@ -1510,7 +1538,7 @@ fn draw_dps_panel(
         pixels,
         "SEGMENT DAMAGE",
         x + 15,
-        y + 229,
+        y + 283,
         15,
         MUTED,
         width - 30,
@@ -1526,8 +1554,8 @@ fn draw_dps_panel(
         pixels,
         &total,
         x + 15,
-        y + 274,
-        31,
+        y + 332,
+        34,
         VIOLET,
         width - 30,
     );
@@ -1690,7 +1718,7 @@ fn draw_outgoing_feed(
                 x + 8,
                 row_y,
                 width - 16,
-                45,
+                FEED_ROW_HEIGHT,
                 6,
                 Color(27, 39, 62, 150),
             );
@@ -1701,8 +1729,8 @@ fn draw_outgoing_feed(
             pixels,
             &compact_number(hit.amount),
             x + 14,
-            row_y + 31,
-            25,
+            row_y + 39,
+            28,
             ORANGE,
             105,
         );
@@ -1721,8 +1749,8 @@ fn draw_outgoing_feed(
             pixels,
             category,
             x + 119,
-            row_y + 28,
-            17,
+            row_y + 36,
+            18,
             WHITE,
             width - 190,
         );
@@ -1732,12 +1760,12 @@ fn draw_outgoing_feed(
             pixels,
             &format_age(hit.age_seconds),
             x + width - 13,
-            row_y + 27,
-            14,
+            row_y + 35,
+            15,
             MUTED,
             58,
         );
-        row_y += 47;
+        row_y += FEED_ROW_STEP;
     }
 }
 
@@ -1820,7 +1848,7 @@ fn draw_incoming_feed(
                 x + 8,
                 row_y,
                 width - 16,
-                45,
+                FEED_ROW_HEIGHT,
                 6,
                 Color(49, 27, 43, 150),
             );
@@ -1831,8 +1859,8 @@ fn draw_incoming_feed(
             pixels,
             &compact_number(event.amount()),
             x + 14,
-            row_y + 31,
-            24,
+            row_y + 39,
+            27,
             RED,
             70,
         );
@@ -1842,8 +1870,8 @@ fn draw_incoming_feed(
             pixels,
             &friendly_incoming_source(event.source.as_deref().unwrap_or_default()),
             x + 87,
-            row_y + 28,
-            16,
+            row_y + 36,
+            17,
             WHITE,
             width - 177,
         );
@@ -1853,39 +1881,12 @@ fn draw_incoming_feed(
             pixels,
             &event.timestamp.format("%H:%M:%S").to_string(),
             x + width - 13,
-            row_y + 27,
-            12,
+            row_y + 35,
+            13,
             MUTED,
             76,
         );
-        row_y += 47;
-    }
-}
-
-fn draw_unavailable_strip(
-    font: &Font,
-    glyphs: &mut HashMap<GlyphKey, CachedGlyph>,
-    pixels: &mut [u8],
-) {
-    fill_rounded_rect(pixels, 24, 448, 976, 39, 9, Color(14, 21, 35, 230));
-    let cell_width = 244;
-    for (index, (label, value)) in UNAVAILABLE_TELEMETRY.into_iter().enumerate() {
-        let cell_x = 24 + index as i32 * cell_width;
-        if index > 0 {
-            fill_rounded_rect(pixels, cell_x, 456, 1, 23, 0, Color(66, 79, 101, 150));
-        }
-        draw_text(font, glyphs, pixels, label, cell_x + 13, 474, 15, MUTED, 84);
-        draw_text_right(
-            font,
-            glyphs,
-            pixels,
-            value,
-            cell_x + cell_width - 13,
-            474,
-            16,
-            ORANGE,
-            135,
-        );
+        row_y += FEED_ROW_STEP;
     }
 }
 
@@ -3005,19 +3006,16 @@ mod tests {
     }
 
     #[test]
-    fn unavailable_native_fields_are_never_presented_as_zeroes() {
-        assert_eq!(
-            UNAVAILABLE_TELEMETRY,
-            [
-                ("HP", "NOT LOGGED"),
-                ("HEALING", "NOT LOGGED"),
-                ("GEMS", "NOT LOGGED"),
-                ("SONG", "NOT LOGGED"),
-            ]
+    fn live_panels_reclaim_the_native_footer() {
+        let panel_bottom = LIVE_PANEL_Y + LIVE_PANEL_HEIGHT;
+        let fifth_row_bottom = LIVE_PANEL_Y + 42 + 4 * FEED_ROW_STEP + FEED_ROW_HEIGHT;
+
+        assert_eq!(panel_bottom, 496);
+        assert_eq!(fifth_row_bottom, 484);
+        assert!(
+            panel_bottom - fifth_row_bottom <= 12,
+            "five live feed rows should use the full panel height"
         );
-        assert!(UNAVAILABLE_TELEMETRY
-            .iter()
-            .all(|(_, value)| *value == "NOT LOGGED"));
     }
 
     #[cfg(target_os = "windows")]
@@ -3071,6 +3069,61 @@ mod tests {
         settings.show_recent_hits = true;
         let with_hits = renderer.render(&snapshot, &settings);
         assert_ne!(without_hits, with_hits);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn live_graph_and_five_row_feeds_render_in_the_former_footer_band() {
+        let time = NaiveDate::from_ymd_opt(2026, 7, 22)
+            .unwrap()
+            .and_hms_opt(23, 54, 0)
+            .unwrap();
+        let recent_hits = (0..5)
+            .map(|index| minmaxxer_core::aggregate::RecentHit {
+                timestamp: time + chrono::Duration::seconds(index),
+                amount: 1_200.0 + index as f64,
+                damage_type: "strike".to_owned(),
+                age_seconds: (5 - index) as f64,
+            })
+            .collect();
+        let recent_events = (0..5)
+            .map(|index| {
+                let mut event = event(
+                    index as u64,
+                    time + chrono::Duration::seconds(index),
+                    EventKind::DamageTaken,
+                    "Local",
+                );
+                event.source = Some(format!("boss_attack_{index}"));
+                event
+            })
+            .collect();
+        let snapshot = EngineSnapshot {
+            outgoing: DamageTotals {
+                total: 123_456.0,
+                ..DamageTotals::default()
+            },
+            recent_hits,
+            recent_events,
+            ..EngineSnapshot::default()
+        };
+        let mut renderer = HudRenderer::new().expect("Windows includes Segoe UI");
+        let live = renderer
+            .render(&snapshot, &VrOverlaySettings::default())
+            .to_vec();
+        let hidden = renderer.render(
+            &snapshot,
+            &VrOverlaySettings {
+                show_total_damage: false,
+                show_incoming: false,
+                show_recent_hits: false,
+                ..VrOverlaySettings::default()
+            },
+        );
+
+        assert!(changed_pixels_in_region(&live, hidden, 24, 448, 334, 488) > 0);
+        assert!(changed_pixels_in_region(&live, hidden, 346, 448, 672, 488) > 0);
+        assert!(changed_pixels_in_region(&live, hidden, 684, 448, 1000, 488) > 0);
     }
 
     #[cfg(target_os = "windows")]
@@ -3304,6 +3357,21 @@ mod tests {
     fn changed_pixels_in_context_row(left: &[u8], right: &[u8]) -> usize {
         (72..104)
             .flat_map(|y| (24..1000).map(move |x| (y * HUD_TEXTURE_WIDTH + x) * 4))
+            .filter(|index| left[*index..*index + 4] != right[*index..*index + 4])
+            .count()
+    }
+
+    #[cfg(target_os = "windows")]
+    fn changed_pixels_in_region(
+        left: &[u8],
+        right: &[u8],
+        left_x: usize,
+        top: usize,
+        right_x: usize,
+        bottom: usize,
+    ) -> usize {
+        (top..bottom)
+            .flat_map(|y| (left_x..right_x).map(move |x| (y * HUD_TEXTURE_WIDTH + x) * 4))
             .filter(|index| left[*index..*index + 4] != right[*index..*index + 4])
             .count()
     }

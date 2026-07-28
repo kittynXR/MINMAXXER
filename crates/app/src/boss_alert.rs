@@ -1,3 +1,4 @@
+use crate::audio_output;
 use crate::config::AppConfig;
 use chrono::NaiveDateTime;
 use minmaxxer_core::BossTargetObservationCause;
@@ -145,10 +146,15 @@ pub async fn monitor(
             }
             BossTargetUpdate::Live(event) => event,
         };
-        let enabled = config
+        let (enabled, audio_output_device_id) = config
             .read()
-            .map(|config| config.boss_target_alert_enabled)
-            .unwrap_or(false);
+            .map(|config| {
+                (
+                    config.boss_target_alert_enabled,
+                    config.audio_output_device_id.clone(),
+                )
+            })
+            .unwrap_or_default();
         let Some(cue) = gate.observe(&event, enabled, Instant::now()) else {
             continue;
         };
@@ -156,42 +162,29 @@ pub async fn monitor(
             AlertCue::Targeted => (BOSS_TARGET_ALERT_WAV, "boss target warning"),
             AlertCue::Released => (BOSS_TARGET_RELEASED_WAV, "boss target all-clear"),
         };
-        if play_alert(sound) {
-            tracing::info!(
-                boss = %event.encounter_name,
-                player = %event.target_player,
-                cue = description,
-                "boss target audio cue played"
-            );
-        } else {
-            tracing::warn!(
-                cue = description,
-                "Windows could not play boss target audio cue"
-            );
+        let boss = event.encounter_name.clone();
+        let player = event.target_player.clone();
+        if let Err(error) = std::thread::Builder::new()
+            .name("minmaxxer-audio-cue".to_owned())
+            .spawn(
+                move || match audio_output::play(sound, &audio_output_device_id) {
+                    Ok(()) => tracing::info!(
+                        %boss,
+                        %player,
+                        cue = description,
+                        "boss target audio cue played"
+                    ),
+                    Err(error) => tracing::warn!(
+                        %error,
+                        cue = description,
+                        "Windows could not play boss target audio cue"
+                    ),
+                },
+            )
+        {
+            tracing::warn!(%error, cue = description, "could not start audio-cue playback");
         }
     }
-}
-
-#[cfg(windows)]
-fn play_alert(sound: &'static [u8]) -> bool {
-    use windows::core::PCSTR;
-    use windows::Win32::Media::Audio::{PlaySoundA, SND_ASYNC, SND_MEMORY, SND_NODEFAULT};
-
-    // SND_MEMORY treats the first argument as an in-memory RIFF image. The bytes are static,
-    // so they remain valid for the full duration of asynchronous playback.
-    unsafe {
-        PlaySoundA(
-            PCSTR(sound.as_ptr()),
-            None,
-            SND_ASYNC | SND_MEMORY | SND_NODEFAULT,
-        )
-        .as_bool()
-    }
-}
-
-#[cfg(not(windows))]
-fn play_alert(_sound: &'static [u8]) -> bool {
-    false
 }
 
 #[cfg(test)]

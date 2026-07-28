@@ -2032,7 +2032,7 @@ dependencies = [
 
 [[package]]
 name = "minmaxxer"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "anyhow",
  "axum",
@@ -2041,6 +2041,7 @@ dependencies = [
  "getrandom 0.3.4",
  "minmaxxer-core",
  "openvr",
+ "openvr_sys",
  "rusqlite",
  "serde",
  "serde_json",
@@ -2057,7 +2058,7 @@ dependencies = [
 
 [[package]]
 name = "minmaxxer-core"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "chrono",
  "regex",

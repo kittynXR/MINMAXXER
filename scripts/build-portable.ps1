@@ -1,5 +1,5 @@
 param(
-    [string]$Version = "0.4.3"
+    [string]$Version = "0.4.4"
 )
 
 $ErrorActionPreference = "Stop"
@@ -23,8 +23,11 @@ try {
         "--remap-path-prefix=$workspace=.",
         "--remap-path-prefix=$profileRoot=."
     ) -join $separator
-    $env:CFLAGS = "/experimental:deterministic /MT /pathmap:`"$profileRoot`"=. /pathmap:`"$workspace`"=."
-    $env:CXXFLAGS = "/experimental:deterministic /MT /pathmap:`"$profileRoot`"=. /pathmap:`"$workspace`"=."
+    # Keep native dependency source paths reproducible without remapping build outputs.
+    # MSVC applies /pathmap to /Fd PDB paths too, so mapping the workspace breaks the
+    # CMake compiler probe used by openvr_sys when its output lives under target/.
+    $env:CFLAGS = "/experimental:deterministic /MT /pathmap:`"$profileRoot`"=."
+    $env:CXXFLAGS = "/experimental:deterministic /MT /pathmap:`"$profileRoot`"=."
 
     & cargo clean --target-dir $portableTarget
     if ($LASTEXITCODE -ne 0) {

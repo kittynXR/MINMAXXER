@@ -217,6 +217,7 @@ pub struct CombatEngine {
     encounter: LiveEncounter,
     focus: Option<FocusSignal>,
     outgoing: DamageTotals,
+    outgoing_healing: f64,
     incoming: IncomingTotals,
     roster: BTreeSet<String>,
     damage_by_type: BTreeMap<String, (f64, u64, f64, f64)>,
@@ -252,6 +253,7 @@ impl CombatEngine {
             encounter: LiveEncounter::default(),
             focus: None,
             outgoing: DamageTotals::default(),
+            outgoing_healing: 0.0,
             incoming: IncomingTotals::default(),
             roster: BTreeSet::new(),
             damage_by_type: BTreeMap::new(),
@@ -434,6 +436,7 @@ impl CombatEngine {
                 self.session_id = None;
             }
             EventKind::DamageDealt => self.add_outgoing(&event),
+            EventKind::Healing => self.add_outgoing_healing(&event),
             EventKind::DamageTaken => self.add_incoming(&event),
             EventKind::OwnershipTransferred => focus_changed = self.observe_focus(&event),
             _ => {}
@@ -519,7 +522,7 @@ impl CombatEngine {
                     damage: outgoing.clone(),
                     incoming: incoming.clone(),
                     attacks: self.attack_stats(),
-                    healing: 0.0,
+                    healing: self.outgoing_healing,
                     active_seconds,
                     deaths: 0,
                 }]
@@ -786,6 +789,7 @@ impl CombatEngine {
         self.encounter = LiveEncounter::default();
         self.focus = None;
         self.outgoing = DamageTotals::default();
+        self.outgoing_healing = 0.0;
         self.incoming = IncomingTotals::default();
         self.damage_by_type.clear();
         self.damage_window.clear();
@@ -835,6 +839,16 @@ impl CombatEngine {
             damage_type,
             age_seconds: 0.0,
         });
+        self.update_duration(event.timestamp);
+    }
+
+    fn add_outgoing_healing(&mut self, event: &GameEvent) {
+        let healer = event.player.as_deref().or(self.observed_player.as_deref());
+        let Some(amount) = healer.and_then(|healer| outgoing_healing_amount(event, healer)) else {
+            return;
+        };
+        self.ensure_combat_started(event.timestamp);
+        self.outgoing_healing += amount;
         self.update_duration(event.timestamp);
     }
 
@@ -1453,12 +1467,18 @@ fn summarize_run(id: String, session_id: Option<u32>, events: &[GameEvent]) -> R
 fn summarize_player(player: &str, events: &[&GameEvent], observation_seconds: f64) -> PlayerStats {
     let first_combat = events
         .iter()
-        .find(|event| matches!(event.kind, EventKind::DamageDealt | EventKind::DamageTaken))
+        .find(|event| {
+            matches!(event.kind, EventKind::DamageDealt | EventKind::DamageTaken)
+                || outgoing_healing_amount(event, player).is_some()
+        })
         .map(|event| event.timestamp);
     let last_combat = events
         .iter()
         .rev()
-        .find(|event| matches!(event.kind, EventKind::DamageDealt | EventKind::DamageTaken))
+        .find(|event| {
+            matches!(event.kind, EventKind::DamageDealt | EventKind::DamageTaken)
+                || outgoing_healing_amount(event, player).is_some()
+        })
         .map(|event| event.timestamp);
     let active_seconds = first_combat
         .zip(last_combat)
@@ -1473,7 +1493,11 @@ fn summarize_player(player: &str, events: &[&GameEvent], observation_seconds: f6
         match event.kind {
             EventKind::DamageDealt => add_damage_total(&mut damage, event),
             EventKind::DamageTaken => add_incoming_total(&mut incoming, event),
-            EventKind::Healing => healing += event.amount(),
+            EventKind::Healing => {
+                if let Some(amount) = outgoing_healing_amount(event, player) {
+                    healing += amount;
+                }
+            }
             EventKind::PlayerDowned => deaths += 1,
             _ => {}
         }
@@ -2012,6 +2036,15 @@ fn summarize_incoming_events<'a>(
     result
 }
 
+fn outgoing_healing_amount(event: &GameEvent, healer: &str) -> Option<f64> {
+    let amount = event.amount();
+    if event.kind != EventKind::Healing || !amount.is_finite() || amount <= 0.0 {
+        return None;
+    }
+    let target = event.target.as_deref()?.trim();
+    (!target.is_empty() && target != healer.trim()).then_some(amount)
+}
+
 fn rolling_sum(
     values: &VecDeque<(NaiveDateTime, f64)>,
     now: Option<NaiveDateTime>,
@@ -2545,6 +2578,59 @@ mod tests {
         assert_eq!(snapshot.outgoing.hits, 2);
         assert_eq!(snapshot.outgoing.rolling_5s, 60.0);
         assert_eq!(snapshot.outgoing.dps, 50.0);
+    }
+
+    #[test]
+    fn live_snapshot_accumulates_outgoing_healing_and_resets_for_the_next_encounter() {
+        let mut engine = CombatEngine::new();
+        engine.ingest(event(0, EventKind::BossStarted, 0.0));
+        let mut healing = event(1, EventKind::Healing, 240.0);
+        healing.target = Some("PlayerTwo".to_owned());
+        engine.ingest(healing);
+        let mut self_healing = event(2, EventKind::Healing, 90.0);
+        self_healing.target = Some("PlayerOne".to_owned());
+        engine.ingest(self_healing);
+        engine.ingest(event(3, EventKind::Healing, 120.0));
+
+        let snapshot = engine.snapshot();
+        assert_eq!(snapshot.players.len(), 1);
+        assert_eq!(snapshot.players[0].healing, 240.0);
+
+        let mut next_boss = event(4, EventKind::BossStarted, 0.0);
+        next_boss.stage = Some("Stage_Next".to_owned());
+        next_boss.boss = Some("NextBoss".to_owned());
+        next_boss.phase = Some(BOSS_PROGRESS_ANCHORS[1]);
+        engine.ingest(next_boss);
+
+        assert_eq!(engine.snapshot().players[0].healing, 0.0);
+    }
+
+    #[test]
+    fn historical_player_healing_excludes_self_heals_and_unattributed_targets() {
+        let mut other_player = event(1, EventKind::Healing, 240.0);
+        other_player.target = Some("PlayerTwo".to_owned());
+        let mut self_heal = event(2, EventKind::Healing, 90.0);
+        self_heal.target = Some("PlayerOne".to_owned());
+        let missing_target = event(3, EventKind::Healing, 120.0);
+        let mut later_other_player = event(4, EventKind::Healing, 60.0);
+        later_other_player.target = Some("PlayerThree".to_owned());
+        let mut negative = event(5, EventKind::Healing, -40.0);
+        negative.target = Some("PlayerTwo".to_owned());
+        let mut non_finite = event(6, EventKind::Healing, f64::NAN);
+        non_finite.target = Some("PlayerTwo".to_owned());
+        let events = [
+            &other_player,
+            &self_heal,
+            &missing_target,
+            &later_other_player,
+            &negative,
+            &non_finite,
+        ];
+
+        let stats = summarize_player("PlayerOne", &events, 10.0);
+
+        assert_eq!(stats.healing, 300.0);
+        assert_eq!(stats.active_seconds, 3.0);
     }
 
     #[test]

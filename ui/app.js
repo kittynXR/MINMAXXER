@@ -26,6 +26,7 @@
     runs: [],
     events: [],
     settings: {},
+    audioDevices: [],
     apiOnline: false,
     streamOnline: false,
     usingMock: true,
@@ -941,6 +942,7 @@
 
   function partyMetricValue(player, metric) {
     if (metric === "damage") return player.damage;
+    if (metric === "healing") return player.healing;
     if (metric === "incoming") return player.incomingDps || (state.live.encounter.duration ? player.incoming / state.live.encounter.duration : 0);
     return player.dps;
   }
@@ -951,8 +953,10 @@
     $("#partyTableBody").innerHTML = players.length ? players.map((player, index) => {
       const value = partyMetricValue(player, state.partyMetric);
       const roleKey = player.role.toLowerCase();
-      return `<tr><td class="rank-cell">${String(index + 1).padStart(2, "0")}</td><td><div class="player-cell"><span class="player-avatar" style="--player-color:${player.color}">${escapeHtml(initials(player.name))}</span>${escapeHtml(player.name)}${player.you ? '<span class="you-pill">YOU</span>' : ""}</div></td><td><span class="role-pill" style="--role-color:${ROLE_COLORS[roleKey] || ROLE_COLORS.unknown}">${escapeHtml(player.role)}</span></td><td class="numeric ${index === 0 ? "positive" : ""}">${formatCompact(player.dps)}</td><td class="numeric">${formatCompact(player.damage, 2)}</td><td class="numeric">${player.damage ? formatPercent(player.strike / player.damage * 100) : "N/A"}</td><td class="numeric">${formatPercent(player.active)}</td><td class="share-cell"><div class="share-track" style="--player-color:${player.color}"><i style="width:${value / total * 100}%"></i></div><small>${formatPercent(value / total * 100)}</small></td></tr>`;
-    }).join("") : `<tr><td colspan="8"><div class="empty-state"><div><strong>Waiting for player data</strong><p>The local player row appears when Ecliptica writes attributable combat events.</p></div></div></td></tr>`;
+      const healingNote = player.healing > 0 ? "Outgoing healing logged to other players" : "No outgoing healing to another player has been logged";
+      const healingValue = player.healing > 0 ? formatCompact(player.healing, 2) : "—";
+      return `<tr><td class="rank-cell">${String(index + 1).padStart(2, "0")}</td><td><div class="player-cell"><span class="player-avatar" style="--player-color:${player.color}">${escapeHtml(initials(player.name))}</span>${escapeHtml(player.name)}${player.you ? '<span class="you-pill">YOU</span>' : ""}</div></td><td><span class="role-pill" style="--role-color:${ROLE_COLORS[roleKey] || ROLE_COLORS.unknown}">${escapeHtml(player.role)}</span></td><td class="numeric ${index === 0 ? "positive" : ""}">${formatCompact(player.dps)}</td><td class="numeric">${formatCompact(player.damage, 2)}</td><td class="numeric positive" title="${healingNote}">${healingValue}</td><td class="numeric">${player.damage ? formatPercent(player.strike / player.damage * 100) : "N/A"}</td><td class="numeric">${formatPercent(player.active)}</td><td class="share-cell"><div class="share-track" style="--player-color:${player.color}"><i style="width:${value / total * 100}%"></i></div><small>${formatPercent(value / total * 100)}</small></td></tr>`;
+    }).join("") : `<tr><td colspan="9"><div class="empty-state"><div><strong>Waiting for player data</strong><p>The local player row appears when Ecliptica writes attributable combat events.</p></div></div></td></tr>`;
   }
 
   function parseElapsedLabel(value) {
@@ -1353,7 +1357,7 @@
   function overlayOptionsFromSearch(search = location.search) {
     const params = new URLSearchParams(search); const hasShow = params.has("show"); const showRaw = params.get("show") ?? "";
     const hitMode = ["hits", "recent_hits"].includes(params.get("mode"));
-    const supported = ["dps", "damage", "incoming", "encounter", "phase", "boss", "hits", "focus", "graph", "survival", "telemetry", "loadout"];
+    const supported = ["dps", "damage", "healing", "incoming", "encounter", "phase", "boss", "hits", "focus", "graph", "survival", "telemetry", "loadout"];
     const parsedShow = hasShow ? showRaw.split(",").map((item) => item === "recent_hits" ? "hits" : item).filter((item) => supported.includes(item)) : hitMode ? ["hits", "focus", "phase", "boss", "survival"] : ["dps", "damage", "incoming", "encounter", "phase", "boss", "hits", "focus", "graph", "survival"];
     if (hasShow && params.get("ui") !== String(OVERLAY_SETTINGS_VERSION)) {
       const telemetryIndex = parsedShow.indexOf("telemetry");
@@ -1380,8 +1384,23 @@
 
   function metricValue(player, metric, duration) {
     if (metric === "damage") return player.damage;
+    if (metric === "healing") return player.healing;
     if (metric === "incoming") return player.incomingDps || player.incoming / Math.max(duration, 1);
     return player.dps;
+  }
+
+  function overlayMetricLabel(metric, scope) {
+    if (metric === "dps") return `${scope.metric} DPS`;
+    if (metric === "damage") return `${scope.metric} DAMAGE`;
+    if (metric === "healing") return "OUTGOING HEALING TO OTHERS";
+    return "DAMAGE TAKEN";
+  }
+
+  function overlayMetricTotal(live, metric) {
+    if (metric === "dps") return live.outgoing.dps;
+    if (metric === "damage") return live.outgoing.total;
+    if (metric === "healing") return live.players.reduce((sum, player) => sum + number(player.healing), 0);
+    return live.incoming.total;
   }
 
   function renderCombatOverlay(root, live, options) {
@@ -1400,7 +1419,7 @@
       return;
     }
     const displayDuration = live.encounter.duration + (live.encounter.active && !state.usingMock && state.lastLiveAt ? Math.max(0, (Date.now() - state.lastLiveAt) / 1000) : 0);
-    const metrics = ["dps", "damage", "incoming"].filter((metric) => options.show.includes(metric));
+    const metrics = ["dps", "damage", "healing", "incoming"].filter((metric) => options.show.includes(metric));
     const scope = liveCombatScope(live);
     const hits = recentHits(live, Math.min(5, options.hitRows || 5));
     const hitsInactive = hitFeedIsInactive(hits);
@@ -1424,7 +1443,7 @@
     const loadout = options.show.includes("loadout") ? `<section class="overlay-loadout${live.loadout?.available ? "" : " unavailable"}" title="${escapeHtml(live.loadout?.sourceNote || "Loadout telemetry is unavailable.")}"><header><span>LOCAL LOADOUT</span><small>${live.loadout?.available ? `${loadoutItems.length} OBSERVED` : "NOT EXPOSED BY LOG"}</small></header>${live.loadout?.available ? `<div>${loadoutItems.length ? loadoutItems.slice(0,8).map((item)=>`<span><b>${escapeHtml(item.name)}</b><i>×${formatNumber(item.stacks)}</i></span>`).join("") : `<em>Observed empty loadout</em>`}</div>` : `<div><em>Ecliptica did not log shop item names or stacks.</em></div>`}</section>` : "";
     const hitWidget = options.show.includes("hits") ? `<section class="overlay-feed overlay-hit-widget ${hitsInactive ? "inactive" : ""}" aria-label="Last five local outgoing damage events"><header><div><span>LAST 5 LOCAL DAMAGE EVENTS</span><small>${hitsInactive ? `IDLE · LAST HIT ${formatHitAge(hits[0].age)} · RETAINED FOR PHASE` : "THE LOG EXPOSES DAMAGE CATEGORY, NOT ABILITY NAME"}</small></div></header>${hits.length ? hits.map((hit,index)=>{const rawAction=String(hit.action||"").toLowerCase().replaceAll("-"," ");const hasAbilityName=state.usingMock&&!["strike","non strike","outgoing hit"].includes(rawAction);return `<div class="overlay-feed-row overlay-hit-row ${index===0&&hitChanged?"newest":""}"><span class="hit-age">${formatHitAge(hit.age)}</span><span class="feed-name"><strong>${escapeHtml(hasAbilityName?hit.action:"LOCAL DAMAGE EVENT")}</strong><small>DAMAGE TYPE</small></span><span class="hit-type ${hit.strike?"strike":"non-strike"}">${hit.strike?"STRIKE":"NON-STRIKE"}</span><strong class="feed-amount">${formatNumber(hit.amount)}${hit.flags.includes("CRIT")?" ✦":""}</strong></div>`}).join("") : `<div class="overlay-hit-empty">Waiting for local outgoing damage…</div>`}</section>` : "";
     const survivalWidget = options.show.includes("survival") ? `<section class="overlay-feed overlay-survival-widget" aria-label="Damage taken and healing received"><header><div><span>SURVIVAL FEED</span><small>INCOMING DAMAGE · HEALING IF EVER LOGGED</small></div><strong>${formatCompact(live.incoming.total)} <em>TAKEN</em></strong></header>${survival.length ? survival.map((event)=>`<div class="overlay-feed-row ${event.healing?"healing":"damage-taken"}"><span class="hit-age">${formatHitAge(event.age)}</span><span class="feed-name"><strong>${escapeHtml(event.label)}</strong><small>${event.healing?"HEAL RECEIVED":"DAMAGE TAKEN"}</small></span><span class="feed-vital">${event.healing?"HEAL":"HIT"}</span><strong class="feed-amount">${event.healing?"+":"−"}${formatNumber(event.amount)}</strong></div>`).join("") : `<div class="overlay-hit-empty">No recent incoming damage. Healing is not exposed by this build.</div>`}</section>` : "";
-    const totalsWidget = metrics.length ? `<div class="overlay-totals">${metrics.map((metric,i)=>{const label=metric==="dps"?`${scope.metric} DPS`:metric==="damage"?`${scope.metric} DAMAGE`:"DAMAGE TAKEN";const value=metric==="dps"?live.outgoing.dps:metric==="damage"?live.outgoing.total:live.incoming.total;return `<div class="overlay-total ${i===0?"accent":""}"><span>${escapeHtml(label)}${scope.excluded&&metric!=="incoming"?" · EXCLUDED":""}</span><strong>${formatCompact(value)}</strong></div>`}).join("")}</div>` : "";
+    const totalsWidget = metrics.length ? `<div class="overlay-totals">${metrics.map((metric,i)=>{const label=overlayMetricLabel(metric,scope);const value=overlayMetricTotal(live,metric);const missingHealing=metric==="healing"&&value===0;const title=missingHealing?' title="No outgoing healing to another player has been logged"':"";return `<div class="overlay-total metric-${metric} ${i===0?"accent":""}"${title}><span>${escapeHtml(label)}${scope.excluded&&metric!=="incoming"?" · EXCLUDED":""}</span><strong>${missingHealing?"—":formatCompact(value)}</strong></div>`}).join("")}</div>` : "";
     const telemetry = options.show.includes("telemetry") ? `<div class="overlay-telemetry" title="Neither complete audited Ecliptica log contains HP, healing, gem, purchase, or soundtrack records."><span><b>HP REMAINING</b><strong>NOT LOGGED</strong></span><span><b>HEALING RECEIVED</b><strong>NOT LOGGED</strong></span><span><b>GEMS / SHOP</b><strong>NOT LOGGED</strong></span><span><b>CURRENT SONG</b><strong>NOT LOGGED</strong></span></div>` : "";
     const graph = options.show.includes("graph") ? dpsGraphMarkup(live, scope) : "";
     root.innerHTML = `<section class="combat-overlay surface-${options.surface} profile-${options.profile} layout-${options.layout} theme-${options.theme}" style="--overlay-accent:${accent[0]};--overlay-accent-rgb:${accent[1]};--overlay-opacity:${options.bg/100};--overlay-scale:${options.scale/100}" aria-label="Live Ecliptica combat overlay"><header class="overlay-head"><div class="overlay-wordmark">MINMAXXER</div><div class="overlay-title"><strong>${escapeHtml(bossName)}</strong><span>${escapeHtml(stageName)} · ${escapeHtml(scope.label)}</span></div><div class="overlay-timer"><strong>${formatDuration(displayDuration,true)}</strong><span>${live.encounter.active?"● LIVE SEGMENT":"WAITING"}</span></div></header>${focus}${runContextWidget}<main class="overlay-stream-body"><div class="overlay-performance">${graph}${totalsWidget}${telemetry}${loadout}</div><div class="overlay-feeds">${hitWidget}${survivalWidget}</div></main><footer class="overlay-foot"><strong>MINMAXXER</strong><span>${state.usingMock?"DEMO DATA":live.connected?"VRCHAT LOG CONNECTED":"WAITING FOR LOG"} · ${escapeHtml(scope.label)}</span></footer></section>`;
@@ -1530,6 +1549,7 @@
     const show = [];
     if (profile.show_dps) show.push("dps");
     if (profile.show_damage) show.push("damage");
+    if (profile.show_healing) show.push("healing");
     if (profile.show_incoming) show.push("incoming");
     if (profile.show_encounter) show.push("encounter");
     if (profile.show_phase) show.push("phase");
@@ -1660,18 +1680,71 @@
     catch (_) { showToast("The import service is unavailable. Start MINMAXXER and try again.", true); }
   }
 
+  function renderAudioOutputDevices(devices, selectedId) {
+    const select = $("#audioOutputDevice");
+    if (!select) return;
+    const available = Array.isArray(devices) ? devices.filter((device) => device && typeof device.id === "string") : [];
+    select.replaceChildren();
+    available.forEach((device) => {
+      const option = document.createElement("option");
+      option.value = device.id;
+      option.textContent = device.name || "Unnamed audio output";
+      select.append(option);
+    });
+    const selectedAvailable = available.some((device) => device.id === selectedId);
+    if (selectedId && !selectedAvailable) {
+      const unavailable = document.createElement("option");
+      unavailable.value = selectedId;
+      unavailable.textContent = "Previously selected device (currently unavailable)";
+      select.append(unavailable);
+    }
+    if (!available.some((device) => device.id === "")) {
+      const fallback = document.createElement("option");
+      fallback.value = "";
+      fallback.textContent = "System default";
+      select.prepend(fallback);
+    }
+    select.value = selectedId;
+    const selected = available.find((device) => device.id === selectedId);
+    if (selectedId && !selectedAvailable) {
+      text("#audioOutputDeviceStatus", "Saved device is currently unavailable. Cues temporarily use System default without changing this choice.");
+    } else if (selectedId && selected) {
+      text("#audioOutputDeviceStatus", `Boss-target cues play through ${selected.name}.`);
+    } else {
+      text("#audioOutputDeviceStatus", "Follows the current Windows default output device.");
+    }
+  }
+
+  async function refreshAudioOutputDevices() {
+    const select = $("#audioOutputDevice");
+    if (!select) return;
+    const configuredId = state.settings.audio_output_device_id ?? "";
+    renderAudioOutputDevices(state.audioDevices, configuredId);
+    select.disabled = true;
+    try {
+      const payload = await api("/api/audio-devices", {}, 4000);
+      state.audioDevices = Array.isArray(payload?.devices) ? payload.devices : [];
+      renderAudioOutputDevices(state.audioDevices, select.value || configuredId);
+    } catch (_) {
+      renderAudioOutputDevices(state.audioDevices, select.value || configuredId);
+      if (!configuredId) text("#audioOutputDeviceStatus", "Audio outputs could not be refreshed; cues still follow the Windows default.");
+    } finally {
+      select.disabled = false;
+    }
+  }
+
   function openSettings() {
     const dialog = $("#settingsDialog"); if (!dialog) return;
     $("#logPath").value = state.settings.log_path ?? state.settings.logPath ?? state.settings.log_directory ?? "";
     $("#importDays").value = clamp(number(state.settings.import_days, 3), 1, 30);
-    setSwitch($("#autoImportToggle"), state.settings.auto_import_recent_logs ?? true); setSwitch($("#bossTargetAlertToggle"), state.settings.boss_target_alert_enabled ?? true); setSwitch($("#launchMinimizedToggle"), state.settings.launch_minimized ?? false); setSwitch($("#minimizeTrayToggle"), state.settings.minimize_to_tray ?? true); dialog.showModal();
+    setSwitch($("#autoImportToggle"), state.settings.auto_import_recent_logs ?? true); setSwitch($("#bossTargetAlertToggle"), state.settings.boss_target_alert_enabled ?? true); setSwitch($("#launchMinimizedToggle"), state.settings.launch_minimized ?? false); setSwitch($("#minimizeTrayToggle"), state.settings.minimize_to_tray ?? true); dialog.showModal(); refreshAudioOutputDevices();
   }
 
   function setSwitch(button, active) { if (!button) return; button.classList.toggle("active", active); button.setAttribute("aria-checked", String(active)); }
   function toggleSwitch(button) { setSwitch(button, button.getAttribute("aria-checked") !== "true"); }
 
   async function saveSettings() {
-    const patch = { log_path: $("#logPath").value.trim(), import_days: clamp(Math.round(number($("#importDays").value, 3)), 1, 30), auto_import_recent_logs: $("#autoImportToggle").getAttribute("aria-checked") === "true", boss_target_alert_enabled: $("#bossTargetAlertToggle").getAttribute("aria-checked") === "true", launch_minimized: $("#launchMinimizedToggle").getAttribute("aria-checked") === "true", minimize_to_tray: $("#minimizeTrayToggle").getAttribute("aria-checked") === "true" };
+    const patch = { log_path: $("#logPath").value.trim(), import_days: clamp(Math.round(number($("#importDays").value, 3)), 1, 30), auto_import_recent_logs: $("#autoImportToggle").getAttribute("aria-checked") === "true", boss_target_alert_enabled: $("#bossTargetAlertToggle").getAttribute("aria-checked") === "true", audio_output_device_id: $("#audioOutputDevice").value, launch_minimized: $("#launchMinimizedToggle").getAttribute("aria-checked") === "true", minimize_to_tray: $("#minimizeTrayToggle").getAttribute("aria-checked") === "true" };
     try { await api("/api/settings", { method: "PUT", body: JSON.stringify(patch) }); state.settings = { ...state.settings, ...patch }; $("#settingsDialog").close(); showToast("Settings saved."); }
     catch (_) { text("#settingsStatus", "Service unavailable — changes not applied."); }
   }
@@ -1692,7 +1765,7 @@
     $("#analysisPlayerSelect")?.addEventListener("change", (event) => { const run = selectedAnalysisRun(); if (run) { const context = selectedAnalysisContext(run); state.analysisPlayerByRun[`${run.id}:${context?.id ?? "all-bosses"}`] = event.target.value; } renderAnalysis(); });
     $("#eventRunSelect")?.addEventListener("change", loadEventsForRun); $("#eventSearch")?.addEventListener("input", renderEvents); $("#eventTypeFilter")?.addEventListener("change", renderEvents); $("#strikeOnly")?.addEventListener("change", renderEvents);
     $("#loadMoreEvents")?.addEventListener("click", () => { state.eventLimit += 80; renderEvents(); }); $("#copyEventsButton")?.addEventListener("click", async () => { await copyText(visibleEvents().map((event) => `${event.time}\t${event.type}\t${event.source}\t${event.action}\t${event.target}\t${event.amount}`).join("\n")); showToast("Visible events copied as tab-separated text."); });
-    $("#settingsButton")?.addEventListener("click", openSettings); ["#autoImportToggle", "#bossTargetAlertToggle", "#launchMinimizedToggle", "#minimizeTrayToggle"].forEach((selector) => $(selector)?.addEventListener("click", (event) => toggleSwitch(event.currentTarget))); $("#saveSettings")?.addEventListener("click", saveSettings);
+    $("#settingsButton")?.addEventListener("click", openSettings); ["#autoImportToggle", "#bossTargetAlertToggle", "#launchMinimizedToggle", "#minimizeTrayToggle"].forEach((selector) => $(selector)?.addEventListener("click", (event) => toggleSwitch(event.currentTarget))); $("#audioOutputDevice")?.addEventListener("change", (event) => renderAudioOutputDevices(state.audioDevices, event.currentTarget.value)); $("#saveSettings")?.addEventListener("click", saveSettings);
     $("#detectLogButton")?.addEventListener("click", () => { $("#logPath").value = "%USERPROFILE%\\AppData\\LocalLow\\VRChat\\VRChat"; text("#settingsStatus", "Default VRChat location selected."); });
     window.addEventListener("resize", debounce(() => { drawLiveChart(); drawCompareChart(); }, 120));
     document.addEventListener("visibilitychange", () => { if (!document.hidden) renderAll(); });

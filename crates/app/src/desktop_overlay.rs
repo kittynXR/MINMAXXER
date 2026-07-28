@@ -161,6 +161,9 @@ fn overlay_url(origin: &Url, runtime: &DesktopOverlayRuntimeConfig) -> Url {
     if profile.show_damage {
         show.push("damage");
     }
+    if profile.show_healing {
+        show.push("healing");
+    }
     if profile.show_incoming {
         show.push("incoming");
     }
@@ -330,8 +333,24 @@ mod tests {
         assert!(show.contains("focus"));
         assert!(show.contains("graph"));
         assert!(show.contains("survival"));
+        assert!(!show.contains("healing"));
         assert!(!show.contains("telemetry"));
         assert!(!show.contains("loadout"));
+    }
+
+    #[test]
+    fn desktop_url_includes_outgoing_healing_only_after_profile_opt_in() {
+        let mut config = AppConfig::default();
+        config.overlay_profiles[0].show_healing = true;
+        let runtime = DesktopOverlayRuntimeConfig::from_app_config(&config);
+        let url = overlay_url(&Url::parse("http://127.0.0.1:49321").unwrap(), &runtime);
+        let show = url
+            .query_pairs()
+            .find(|(key, _)| key == "show")
+            .map(|(_, value)| value.into_owned())
+            .unwrap();
+
+        assert!(show.split(',').any(|item| item == "healing"));
     }
 
     #[test]

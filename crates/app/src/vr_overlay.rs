@@ -13,7 +13,7 @@ use openvr::{
     Context, Overlay, System, TrackedControllerRole, TrackedDeviceIndex, TrackingUniverseOrigin,
 };
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, fs, future::pending, path::PathBuf, time::Duration};
+use std::{collections::HashMap, fs, future::pending, mem, path::PathBuf, time::Duration};
 use tauri::async_runtime::JoinHandle;
 use tokio::{
     sync::{oneshot, watch},
@@ -26,6 +26,10 @@ pub const HUD_TEXTURE_HEIGHT: usize = 512;
 const HUD_BYTES_PER_PIXEL: usize = 4;
 const MIN_SUBMIT_INTERVAL: Duration = Duration::from_millis(250);
 const RECONNECT_INTERVAL: Duration = Duration::from_secs(5);
+const OVERLAY_EVENT_POLL_INTERVAL: Duration = Duration::from_millis(16);
+const VISIBILITY_RECONCILE_INTERVAL: Duration = Duration::from_millis(250);
+const TEXTURE_UPLOAD_TIMEOUT: Duration = Duration::from_secs(2);
+const MAX_CONSECUTIVE_SESSION_FAILURES: u8 = 3;
 const CONTROLLER_IDLE_INTERVAL: Duration = Duration::from_millis(50);
 const CONTROLLER_PLACING_INTERVAL: Duration = Duration::from_millis(16);
 
@@ -62,6 +66,7 @@ pub struct VrOverlaySettings {
     pub show_focus: bool,
     pub show_rolling_dps: bool,
     pub show_total_damage: bool,
+    pub show_healing: bool,
     pub show_incoming: bool,
     pub show_players: bool,
     pub show_attacks: bool,
@@ -89,6 +94,7 @@ impl Default for VrOverlaySettings {
             show_focus: true,
             show_rolling_dps: true,
             show_total_damage: true,
+            show_healing: false,
             show_incoming: true,
             show_players: true,
             show_attacks: true,
@@ -317,8 +323,11 @@ pub async fn run_vr_overlay(
     let mut dirty = settings.enabled;
     let mut last_submit: Option<Instant> = None;
     let mut reconnect_at = Instant::now();
+    let mut next_session_poll = Instant::now();
     let mut next_controller_poll = Instant::now();
     let mut last_controller_poll = Instant::now();
+    let mut upload_failures = FailureStreak::default();
+    let mut maintenance_failures = FailureStreak::default();
     let mut gesture = GrabGesture::default();
     let mut placement_state = if settings.enabled && settings.controller_grab_enabled {
         VrPlacementState::Unavailable
@@ -370,6 +379,9 @@ pub async fn run_vr_overlay(
                     };
                     next_controller_poll = Instant::now();
                     last_controller_poll = Instant::now();
+                    next_session_poll = Instant::now();
+                    upload_failures.clear();
+                    maintenance_failures.clear();
                     dirty = true;
                 }
                 Err(error) => {
@@ -379,6 +391,56 @@ pub async fn run_vr_overlay(
                     status.last_error = Some(error.message);
                     reconnect_at = Instant::now() + RECONNECT_INTERVAL;
                 }
+            }
+            publish_status(&status_tx, &status);
+        }
+
+        if settings.enabled && session.is_some() && Instant::now() >= next_session_poll {
+            let now = Instant::now();
+            let mut reconnect = false;
+            let current_session = session.as_mut().expect("session checked above");
+            match current_session.maintain(now) {
+                Ok(maintenance) => {
+                    let visibility_recovered = maintenance_failures.0 > 0;
+                    maintenance_failures.clear();
+                    status.visible = current_session.visible;
+                    if maintenance.texture_loaded {
+                        upload_failures.clear();
+                        status.last_error = placement_error.clone();
+                    }
+                    if maintenance.texture_failed {
+                        dirty = true;
+                        status.last_error = Some(
+                            "SteamVR could not finish loading the HUD texture; retrying".to_owned(),
+                        );
+                        reconnect = upload_failures.record();
+                    } else if visibility_recovered && upload_failures.0 == 0 {
+                        status.last_error = placement_error.clone();
+                    }
+                }
+                Err(error) => {
+                    status.visible = current_session.visible;
+                    status.last_error = Some(error);
+                    reconnect = maintenance_failures.record();
+                }
+            }
+            next_session_poll = now + OVERLAY_EVENT_POLL_INTERVAL;
+
+            if reconnect {
+                if let Some(mut failed_session) = session.take() {
+                    failed_session.hide();
+                }
+                status.active = false;
+                status.visible = false;
+                gesture.reset();
+                placement_state = if settings.controller_grab_enabled {
+                    VrPlacementState::Unavailable
+                } else {
+                    VrPlacementState::Disabled
+                };
+                reconnect_at = now + RECONNECT_INTERVAL;
+                upload_failures.clear();
+                maintenance_failures.clear();
             }
             publish_status(&status_tx, &status);
         }
@@ -503,38 +565,58 @@ pub async fn run_vr_overlay(
 
         let submit_ready = settings.enabled
             && session.is_some()
+            && session.as_ref().is_some_and(VrSession::can_submit)
             && dirty
             && last_submit
                 .map(|last| Instant::now().duration_since(last) >= MIN_SUBMIT_INTERVAL)
                 .unwrap_or(true);
 
         if submit_ready {
+            let now = Instant::now();
             let current_session = session.as_mut().expect("session checked above");
             let transform = effective_transform(&settings, runtime_transform);
-            match current_session.submit(&snapshot, &settings, placement_state, transform) {
+            let submit =
+                current_session.submit(&snapshot, &settings, placement_state, transform, now);
+            let mut reconnect = false;
+            match submit {
                 Ok(()) => {
                     dirty = false;
-                    last_submit = Some(Instant::now());
+                    last_submit = Some(now);
                     status.active = true;
-                    status.visible = true;
+                    status.visible = current_session.visible;
                     status.frames_submitted = status.frames_submitted.saturating_add(1);
                     status.snapshot_version = Some(snapshot.version);
-                    status.last_error = placement_error.clone();
                 }
-                Err(error) => {
-                    current_session.hide();
-                    session = None;
-                    status.active = false;
-                    status.visible = false;
+                Err(SubmitError::Recoverable(error)) => {
+                    dirty = true;
+                    last_submit = Some(now);
+                    status.active = true;
+                    status.visible = current_session.visible;
                     status.last_error = Some(error);
-                    gesture.reset();
-                    placement_state = if settings.controller_grab_enabled {
-                        VrPlacementState::Unavailable
-                    } else {
-                        VrPlacementState::Disabled
-                    };
-                    reconnect_at = Instant::now() + RECONNECT_INTERVAL;
+                    reconnect = upload_failures.record();
                 }
+                Err(SubmitError::Fatal(error)) => {
+                    status.last_error = Some(error);
+                    reconnect = true;
+                }
+            }
+            next_session_poll = next_session_poll.min(now + OVERLAY_EVENT_POLL_INTERVAL);
+
+            if reconnect {
+                if let Some(mut failed_session) = session.take() {
+                    failed_session.hide();
+                }
+                status.active = false;
+                status.visible = false;
+                gesture.reset();
+                placement_state = if settings.controller_grab_enabled {
+                    VrPlacementState::Unavailable
+                } else {
+                    VrPlacementState::Disabled
+                };
+                reconnect_at = now + RECONNECT_INTERVAL;
+                upload_failures.clear();
+                maintenance_failures.clear();
             }
             publish_status(&status_tx, &status);
         }
@@ -544,7 +626,7 @@ pub async fn run_vr_overlay(
             None
         } else if session.is_none() {
             Some(reconnect_at)
-        } else if dirty {
+        } else if dirty && session.as_ref().is_some_and(VrSession::can_submit) {
             Some(
                 last_submit
                     .map(|last| last + MIN_SUBMIT_INTERVAL)
@@ -559,7 +641,15 @@ pub async fn run_vr_overlay(
             } else {
                 None
             };
-        let wake_at = earliest_deadline(submit_or_reconnect_at, controller_at);
+        let session_at = if settings.enabled && session.is_some() {
+            Some(next_session_poll)
+        } else {
+            None
+        };
+        let wake_at = earliest_deadline(
+            earliest_deadline(submit_or_reconnect_at, controller_at),
+            session_at,
+        );
 
         tokio::select! {
             biased;
@@ -687,16 +777,184 @@ struct SessionError {
 }
 
 struct VrSession {
-    // Declared after the OpenVR interfaces so it is dropped last.
+    // OpenVR interfaces and all other state drop before the Context shuts the runtime down.
     overlay: Overlay,
     system: System,
     handle: OverlayHandle,
+    events: OverlayEventPoller,
     renderer: HudRenderer,
     controller_placement: Option<ActiveControllerPlacement>,
     applied: AppliedOverlayState,
+    desired_visible: bool,
     visible: bool,
     visibility_dirty: bool,
+    next_visibility_reconcile: Instant,
     _context: Context,
+    // SetOverlayRaw completes asynchronously. Keep its backing memory alive even while Context is
+    // shutting down so a disabled/reconnecting session cannot free an in-flight buffer too early.
+    upload: RawTextureUpload,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct OverlayRuntimeEvents {
+    texture: Option<TextureRuntimeEvent>,
+    visibility: Option<bool>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TextureRuntimeEvent {
+    Loaded,
+    Failed,
+}
+
+/// Access to the one IVROverlay function missing from openvr 0.9's safe wrapper. The function
+/// table belongs to the OpenVR context and is only used while `_context` is alive.
+#[derive(Clone, Copy)]
+struct OverlayEventPoller {
+    table: &'static openvr_sys::VR_IVROverlay_FnTable,
+}
+
+impl OverlayEventPoller {
+    fn load() -> Result<Self, String> {
+        let mut version = b"FnTable:".to_vec();
+        version.extend_from_slice(openvr_sys::IVROverlay_Version);
+        let mut error = openvr_sys::EVRInitError_VRInitError_None;
+        // SAFETY: OpenVR has already been initialized for this session. The returned function
+        // table is runtime-owned and remains valid until the Context stored by VrSession drops.
+        let raw =
+            unsafe { openvr_sys::VR_GetGenericInterface(version.as_ptr().cast(), &mut error) };
+        if raw == 0 || error != openvr_sys::EVRInitError_VRInitError_None {
+            return Err(format!(
+                "SteamVR overlay event interface is unavailable (initialization error {error})"
+            ));
+        }
+        // SAFETY: a successful `FnTable:IVROverlay_*` lookup returns this exact table type. The
+        // reference cannot outlive VrSession because the table is private to that session.
+        let table = unsafe { &*(raw as *const openvr_sys::VR_IVROverlay_FnTable) };
+        if table.PollNextOverlayEvent.is_none() {
+            return Err("SteamVR overlay event polling is unavailable".to_owned());
+        }
+        Ok(Self { table })
+    }
+
+    fn poll(self, handle: OverlayHandle) -> OverlayRuntimeEvents {
+        let poll = self
+            .table
+            .PollNextOverlayEvent
+            .expect("function checked while loading the interface");
+        let mut events = OverlayRuntimeEvents::default();
+        loop {
+            let mut event = openvr_sys::VREvent_t::default();
+            // SAFETY: `event` is writable for the advertised size, `handle` belongs to the same
+            // context/function table, and the call is serialized with all other overlay calls.
+            let available = unsafe {
+                poll(
+                    handle.0,
+                    &mut event,
+                    mem::size_of::<openvr_sys::VREvent_t>() as u32,
+                )
+            };
+            if !available {
+                break;
+            }
+            match event.eventType as openvr_sys::EVREventType {
+                openvr_sys::EVREventType_VREvent_ImageLoaded => {
+                    events.texture = Some(TextureRuntimeEvent::Loaded)
+                }
+                openvr_sys::EVREventType_VREvent_ImageFailed => {
+                    events.texture = Some(TextureRuntimeEvent::Failed)
+                }
+                openvr_sys::EVREventType_VREvent_OverlayShown => events.visibility = Some(true),
+                openvr_sys::EVREventType_VREvent_OverlayHidden => events.visibility = Some(false),
+                _ => {}
+            }
+        }
+        events
+    }
+}
+
+struct RawTextureUpload {
+    buffer: Vec<u8>,
+    pending_since: Option<Instant>,
+    completed_once: bool,
+}
+
+impl RawTextureUpload {
+    fn new() -> Self {
+        Self {
+            buffer: vec![0; HUD_TEXTURE_WIDTH * HUD_TEXTURE_HEIGHT * HUD_BYTES_PER_PIXEL],
+            pending_since: None,
+            completed_once: false,
+        }
+    }
+
+    fn can_submit(&self) -> bool {
+        self.pending_since.is_none()
+    }
+
+    fn prepare(&mut self, pixels: &[u8]) -> Result<(), String> {
+        if !self.can_submit() {
+            return Err("the prior SteamVR texture upload is still in flight".to_owned());
+        }
+        if pixels.len() != self.buffer.len() {
+            return Err("the rendered SteamVR texture has an unexpected size".to_owned());
+        }
+        self.buffer.copy_from_slice(pixels);
+        Ok(())
+    }
+
+    fn mark_submitted(&mut self, now: Instant) {
+        debug_assert!(self.pending_since.is_none());
+        self.pending_since = Some(now);
+    }
+
+    fn cancel_submission(&mut self) {
+        self.pending_since = None;
+    }
+
+    fn mark_loaded(&mut self) -> bool {
+        let completed = self.pending_since.take().is_some();
+        self.completed_once |= completed;
+        completed
+    }
+
+    fn has_completed_frame(&self) -> bool {
+        self.completed_once
+    }
+
+    fn mark_failed(&mut self) -> bool {
+        self.pending_since.take().is_some()
+    }
+
+    fn timed_out(&self, now: Instant) -> bool {
+        self.pending_since
+            .is_some_and(|started| now.duration_since(started) >= TEXTURE_UPLOAD_TIMEOUT)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct FailureStreak(u8);
+
+impl FailureStreak {
+    fn record(&mut self) -> bool {
+        self.0 = self.0.saturating_add(1);
+        self.0 >= MAX_CONSECUTIVE_SESSION_FAILURES
+    }
+
+    fn clear(&mut self) {
+        self.0 = 0;
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct SessionMaintenance {
+    texture_loaded: bool,
+    texture_failed: bool,
+}
+
+enum SubmitError {
+    Recoverable(String),
+    Fatal(String),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -794,6 +1052,10 @@ impl VrSession {
             message: format!("SteamVR overlay interface is unavailable: {error}"),
             runtime_available: true,
         })?;
+        let events = OverlayEventPoller::load().map_err(|message| SessionError {
+            message,
+            runtime_available: true,
+        })?;
         let handle = overlay
             .create_overlay(OVERLAY_KEY, OVERLAY_NAME)
             .map_err(|error| SessionError {
@@ -807,11 +1069,15 @@ impl VrSession {
             overlay,
             system,
             handle,
+            events,
             renderer,
+            upload: RawTextureUpload::new(),
             controller_placement: None,
             applied: AppliedOverlayState::default(),
+            desired_visible: false,
             visible: false,
             visibility_dirty: false,
+            next_visibility_reconcile: Instant::now(),
             _context: context,
         })
     }
@@ -822,46 +1088,104 @@ impl VrSession {
         settings: &VrOverlaySettings,
         placement_state: VrPlacementState,
         hmd_transform: RigidTransform,
-    ) -> Result<(), String> {
+        submitted_at: Instant,
+    ) -> Result<(), SubmitError> {
         let settings = settings.sanitized();
         if self.applied.needs_width(settings.width_m) {
             self.overlay
                 .set_width(self.handle, settings.width_m)
-                .map_err(|error| format!("SteamVR rejected HUD width: {error:?}"))?;
+                .map_err(|error| {
+                    SubmitError::Fatal(format!("SteamVR rejected HUD width: {error:?}"))
+                })?;
             self.applied.width_m = Some(settings.width_m);
         }
         if self.applied.needs_opacity(settings.opacity) {
             self.overlay
                 .set_opacity(self.handle, settings.opacity)
-                .map_err(|error| format!("SteamVR rejected HUD opacity: {error:?}"))?;
+                .map_err(|error| {
+                    SubmitError::Fatal(format!("SteamVR rejected HUD opacity: {error:?}"))
+                })?;
             self.applied.opacity = Some(settings.opacity);
         }
         if self.applied.needs_curvature(settings.curvature) {
             self.overlay
                 .set_curvature(self.handle, settings.curvature)
-                .map_err(|error| format!("SteamVR rejected HUD curvature: {error:?}"))?;
+                .map_err(|error| {
+                    SubmitError::Fatal(format!("SteamVR rejected HUD curvature: {error:?}"))
+                })?;
             self.applied.curvature = Some(settings.curvature);
         }
 
         if self.controller_placement.is_none() {
-            self.set_hmd_transform(hmd_transform)?;
+            self.set_hmd_transform(hmd_transform)
+                .map_err(SubmitError::Fatal)?;
         }
 
         let pixels = self
             .renderer
             .render_with_placement(snapshot, &settings, placement_state);
-        self.overlay
-            .set_raw_data(
-                self.handle,
-                pixels,
-                HUD_TEXTURE_WIDTH,
-                HUD_TEXTURE_HEIGHT,
-                HUD_BYTES_PER_PIXEL,
-            )
-            .map_err(|error| format!("SteamVR texture upload failed: {error:?}"))?;
+        self.upload
+            .prepare(pixels)
+            .map_err(SubmitError::Recoverable)?;
+        let result = self.overlay.set_raw_data(
+            self.handle,
+            &self.upload.buffer,
+            HUD_TEXTURE_WIDTH,
+            HUD_TEXTURE_HEIGHT,
+            HUD_BYTES_PER_PIXEL,
+        );
+        if let Err(error) = result {
+            self.upload.cancel_submission();
+            return Err(SubmitError::Recoverable(format!(
+                "SteamVR texture upload failed: {error:?}"
+            )));
+        }
+        self.upload.mark_submitted(submitted_at);
 
-        self.ensure_visible()?;
         Ok(())
+    }
+
+    fn can_submit(&self) -> bool {
+        self.upload.can_submit()
+    }
+
+    fn maintain(&mut self, now: Instant) -> Result<SessionMaintenance, String> {
+        let events = self.events.poll(self.handle);
+        let mut result = SessionMaintenance::default();
+        let mut visibility_event = false;
+
+        match events.texture {
+            Some(TextureRuntimeEvent::Loaded) => {
+                if self.upload.mark_loaded() {
+                    result.texture_loaded = true;
+                    self.desired_visible = self.upload.has_completed_frame();
+                    self.visibility_dirty = true;
+                }
+            }
+            Some(TextureRuntimeEvent::Failed) => {
+                result.texture_failed = self.upload.mark_failed();
+            }
+            None => {}
+        }
+        if let Some(visible) = events.visibility {
+            self.visible = visible;
+            visibility_event = true;
+            if !visible && self.desired_visible {
+                self.visibility_dirty = true;
+            }
+        }
+
+        if self.upload.timed_out(now) {
+            return Err(
+                "SteamVR did not finish the HUD texture upload within two seconds".to_owned(),
+            );
+        }
+
+        if visibility_event || self.visibility_dirty || now >= self.next_visibility_reconcile {
+            self.reconcile_visibility()?;
+            self.next_visibility_reconcile = now + VISIBILITY_RECONCILE_INTERVAL;
+        }
+        Ok(result)
     }
 
     fn poll_controllers(&self, placement_active: bool) -> ControllerPoll {
@@ -963,7 +1287,8 @@ impl VrSession {
             )
             .map_err(|error| format!("SteamVR rejected HUD placement: {error:?}"))?;
         self.applied.transform = Some(next);
-        self.reassert_visibility_after_transform_kind_change(kind_changed)
+        self.reassert_visibility_after_transform_kind_change(kind_changed);
+        Ok(())
     }
 
     fn set_controller_transform(
@@ -986,31 +1311,30 @@ impl VrSession {
                 format!("SteamVR rejected controller-relative placement: {error:?}")
             })?;
         self.applied.transform = Some(next);
-        self.reassert_visibility_after_transform_kind_change(kind_changed)
-    }
-
-    fn reassert_visibility_after_transform_kind_change(
-        &mut self,
-        kind_changed: bool,
-    ) -> Result<(), String> {
-        if kind_changed && self.visible {
-            // VROS observed that switching between device-relative transform kinds can make an
-            // otherwise-visible overlay disappear. Mark then immediately reconcile; if the call
-            // fails the dirty bit remains set for the next submission.
-            self.visibility_dirty = true;
-            self.ensure_visible()?;
-        }
+        self.reassert_visibility_after_transform_kind_change(kind_changed);
         Ok(())
     }
 
-    fn ensure_visible(&mut self) -> Result<(), String> {
-        if !self.visible || self.visibility_dirty {
+    fn reassert_visibility_after_transform_kind_change(&mut self, kind_changed: bool) {
+        if kind_changed && self.desired_visible {
+            // VROS observed that switching between device-relative transform kinds can make an
+            // otherwise-visible overlay disappear. The event loop reconciles this on its next
+            // 16 ms tick without touching the texture or toggling visibility pre-emptively.
+            self.visibility_dirty = true;
+        }
+    }
+
+    fn reconcile_visibility(&mut self) -> Result<(), String> {
+        self.visible = self.overlay.is_visible(self.handle);
+        if self.desired_visible && !self.visible {
             self.overlay
                 .set_visibility(self.handle, true)
                 .map_err(|error| format!("SteamVR could not show the HUD: {error:?}"))?;
             self.visible = true;
-            self.visibility_dirty = false;
         }
+        // A dirty bit schedules an immediate runtime query; it must not force a redundant
+        // ShowOverlay call because re-showing an already-visible quad can itself flash for a frame.
+        self.visibility_dirty = false;
         Ok(())
     }
 
@@ -1037,11 +1361,13 @@ impl VrSession {
     }
 
     fn hide(&mut self) {
-        if self.visible {
+        if self.desired_visible || self.visible {
             let _ = self.overlay.set_visibility(self.handle, false);
-            self.visible = false;
         }
+        self.desired_visible = false;
+        self.visible = false;
         self.visibility_dirty = false;
+        self.upload.cancel_submission();
     }
 }
 
@@ -1533,33 +1859,86 @@ fn draw_dps_panel(
         );
     }
 
-    draw_text(
-        font,
-        glyphs,
-        pixels,
-        "SEGMENT DAMAGE",
-        x + 15,
-        y + 283,
-        15,
-        MUTED,
-        width - 30,
-    );
-    let total = if settings.show_total_damage {
-        compact_number(snapshot.outgoing.total)
-    } else {
-        "HIDDEN".to_owned()
-    };
-    draw_text(
-        font,
-        glyphs,
-        pixels,
-        &total,
-        x + 15,
-        y + 332,
-        34,
-        VIOLET,
-        width - 30,
-    );
+    let footer = dps_footer_metrics(snapshot, settings);
+    let footer_width = width - 30;
+    let column_width = footer_width / footer.len() as i32;
+    if footer.len() > 1 {
+        fill_rounded_rect(
+            pixels,
+            x + 15 + column_width,
+            y + 275,
+            1,
+            59,
+            0,
+            Color(64, 78, 104, 150),
+        );
+    }
+    for (index, (label, value, color)) in footer.iter().enumerate() {
+        let column_x = x + 15 + index as i32 * column_width;
+        let inset = if index == 0 { 0 } else { 10 };
+        let available = column_width - inset - if footer.len() > 1 { 8 } else { 0 };
+        draw_text(
+            font,
+            glyphs,
+            pixels,
+            label,
+            column_x + inset,
+            y + 283,
+            if footer.len() > 1 { 13 } else { 15 },
+            MUTED,
+            available,
+        );
+        draw_text(
+            font,
+            glyphs,
+            pixels,
+            value,
+            column_x + inset,
+            y + 332,
+            if footer.len() > 1 { 29 } else { 34 },
+            *color,
+            available,
+        );
+    }
+}
+
+fn dps_footer_metrics(
+    snapshot: &EngineSnapshot,
+    settings: &VrOverlaySettings,
+) -> Vec<(&'static str, String, Color)> {
+    let mut metrics = Vec::with_capacity(2);
+    if settings.show_total_damage {
+        metrics.push((
+            "SEGMENT DAMAGE",
+            compact_number(snapshot.outgoing.total),
+            VIOLET,
+        ));
+    } else if !settings.show_healing {
+        // Preserve the established disabled state when neither optional footer metric is selected.
+        metrics.push(("SEGMENT DAMAGE", "HIDDEN".to_owned(), VIOLET));
+    }
+    if settings.show_healing {
+        let healing = outgoing_healing_total(snapshot);
+        metrics.push((
+            "HEALING TO OTHERS",
+            if healing > 0.0 {
+                compact_number(healing)
+            } else {
+                "NO DATA".to_owned()
+            },
+            GREEN,
+        ));
+    }
+    metrics
+}
+
+fn outgoing_healing_total(snapshot: &EngineSnapshot) -> f64 {
+    snapshot
+        .players
+        .iter()
+        .map(|player| player.healing)
+        .filter(|healing| healing.is_finite() && *healing > 0.0)
+        .sum()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2649,7 +3028,22 @@ mod tests {
 
         assert!(settings.show_phase);
         assert!(settings.show_boss_number);
+        assert!(!settings.show_healing);
         assert!(!settings.show_loadout);
+    }
+
+    #[test]
+    fn outgoing_healing_is_an_opt_in_sanitized_vr_setting() {
+        let settings: VrOverlaySettings = serde_json::from_value(serde_json::json!({
+            "show_healing": true
+        }))
+        .unwrap();
+
+        assert!(settings.sanitized().show_healing);
+        assert_eq!(
+            serde_json::to_value(settings).unwrap()["show_healing"],
+            true
+        );
     }
 
     #[test]
@@ -2732,6 +3126,53 @@ mod tests {
             combined.len() < 40,
             "default VR summary should stay compact"
         );
+    }
+
+    #[test]
+    fn native_dps_footer_splits_damage_and_outgoing_healing_only_when_selected() {
+        let snapshot = EngineSnapshot {
+            outgoing: DamageTotals {
+                total: 12_000.0,
+                ..DamageTotals::default()
+            },
+            players: vec![
+                PlayerStats {
+                    healing: 2_500.0,
+                    ..PlayerStats::default()
+                },
+                PlayerStats {
+                    healing: 750.0,
+                    ..PlayerStats::default()
+                },
+                PlayerStats {
+                    healing: f64::NAN,
+                    ..PlayerStats::default()
+                },
+            ],
+            ..EngineSnapshot::default()
+        };
+        let mut settings = VrOverlaySettings::default();
+
+        let damage_only = dps_footer_metrics(&snapshot, &settings);
+        assert_eq!(damage_only.len(), 1);
+        assert_eq!(damage_only[0].0, "SEGMENT DAMAGE");
+        assert_eq!(damage_only[0].1, "12.0k");
+
+        settings.show_healing = true;
+        let split = dps_footer_metrics(&snapshot, &settings);
+        assert_eq!(split.len(), 2);
+        assert_eq!(split[0].0, "SEGMENT DAMAGE");
+        assert_eq!(split[1].0, "HEALING TO OTHERS");
+        assert_eq!(split[1].1, "3.2k");
+
+        settings.show_total_damage = false;
+        let healing_only = dps_footer_metrics(&snapshot, &settings);
+        assert_eq!(healing_only.len(), 1);
+        assert_eq!(healing_only[0].0, "HEALING TO OTHERS");
+        assert_eq!(healing_only[0].1, "3.2k");
+
+        let no_healing_data = dps_footer_metrics(&EngineSnapshot::default(), &settings);
+        assert_eq!(no_healing_data[0].1, "NO DATA");
     }
 
     #[test]
@@ -2844,6 +3285,59 @@ mod tests {
             transform,
         };
         assert_eq!(applied.transform_change(controller), (true, true));
+    }
+
+    #[test]
+    fn raw_texture_buffer_stays_stable_until_steamvr_finishes_loading_it() {
+        let now = Instant::now();
+        let mut upload = RawTextureUpload::new();
+        let first = vec![7; upload.buffer.len()];
+        let replacement = vec![9; upload.buffer.len()];
+
+        upload.prepare(&first).unwrap();
+        let buffer_pointer = upload.buffer.as_ptr();
+        upload.mark_submitted(now);
+
+        assert!(!upload.can_submit());
+        assert!(!upload.has_completed_frame());
+        assert!(upload.prepare(&replacement).is_err());
+        assert_eq!(upload.buffer.as_ptr(), buffer_pointer);
+        assert_eq!(upload.buffer, first);
+        assert!(!upload.timed_out(now + TEXTURE_UPLOAD_TIMEOUT - Duration::from_millis(1)));
+        assert!(upload.timed_out(now + TEXTURE_UPLOAD_TIMEOUT));
+
+        assert!(upload.mark_loaded());
+        assert!(upload.can_submit());
+        assert!(upload.has_completed_frame());
+        upload.prepare(&replacement).unwrap();
+        assert_eq!(upload.buffer.as_ptr(), buffer_pointer);
+        assert_eq!(upload.buffer, replacement);
+    }
+
+    #[test]
+    fn failed_raw_texture_load_reopens_the_gate_without_showing_an_initial_frame() {
+        let now = Instant::now();
+        let mut upload = RawTextureUpload::new();
+        let pixels = vec![3; upload.buffer.len()];
+
+        upload.prepare(&pixels).unwrap();
+        upload.mark_submitted(now);
+        assert!(upload.mark_failed());
+
+        assert!(upload.can_submit());
+        assert!(!upload.has_completed_frame());
+        assert!(!upload.timed_out(now + TEXTURE_UPLOAD_TIMEOUT));
+    }
+
+    #[test]
+    fn transient_runtime_errors_do_not_reconnect_until_the_failure_streak_persists() {
+        let mut failures = FailureStreak::default();
+        assert!(!failures.record());
+        assert!(!failures.record());
+        failures.clear();
+        assert!(!failures.record());
+        assert!(!failures.record());
+        assert!(failures.record());
     }
 
     #[test]
@@ -3083,6 +3577,35 @@ mod tests {
             frame.as_ptr(),
             "frame buffer should be reused"
         );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn outgoing_healing_toggle_changes_only_the_opt_in_native_footer_content() {
+        let snapshot = EngineSnapshot {
+            outgoing: DamageTotals {
+                total: 12_000.0,
+                ..DamageTotals::default()
+            },
+            players: vec![PlayerStats {
+                player: "Local".to_owned(),
+                healing: 3_250.0,
+                ..PlayerStats::default()
+            }],
+            ..EngineSnapshot::default()
+        };
+        let mut settings = VrOverlaySettings {
+            show_total_damage: false,
+            show_healing: false,
+            ..VrOverlaySettings::default()
+        };
+        let mut renderer = HudRenderer::new().expect("Windows includes Segoe UI");
+        let hidden = renderer.render(&snapshot, &settings).to_vec();
+
+        settings.show_healing = true;
+        let visible = renderer.render(&snapshot, &settings);
+
+        assert!(changed_pixels_in_region(&hidden, visible, 39, 420, 319, 486) > 100);
     }
 
     #[cfg(target_os = "windows")]

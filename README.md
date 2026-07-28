@@ -66,7 +66,7 @@ Each player runs MINMAXXER during the run, or sends their `output_log_*.txt` aft
 
 Do not interpret roster names or network ownership as damage attribution. Ecliptica does not place the remote attacker on damage lines.
 
-Historical run analysis prioritizes optimization time: if a run contains boss-start telemetry, its primary duration, DPS, damage, attacks, and player totals include only the boss windows. Pre-boss combat remains available as a separate subtotal instead of being blended into boss performance. A boss window ends at the first reliable boundary, preferring a matching named boss-death or personal-summary record, then a following boss start, intermission, lobby, world exit, or stage transition. The analyzer falls back to the observed combat span only when no boss windows are present.
+Historical run analysis prioritizes optimization time: if a run contains boss-start telemetry, its primary duration, DPS, damage, attacks, and player totals include only the boss windows. Pre-boss combat remains available as a separate subtotal instead of being blended into boss performance. A boss window ends at the first reliable boundary, preferring a matching named boss-death or personal-summary record, then a following boss start, intermission, lobby, world exit, or stage transition. Damage recorded after that collector's boundary remains available in raw observed telemetry but cannot change the completed boss's timer, graph, totals, or DPS. The analyzer falls back to the observed combat span only when no boss windows are present.
 
 ## Data and settings
 
@@ -88,6 +88,6 @@ cargo build --release -p minmaxxer
 ./scripts/build-portable.ps1
 ```
 
-The normal executable is written to `target\release\minmaxxer.exe`. The portable release script uses a clean isolated target, statically links the MSVC runtime, strips local build paths, and writes `dist\MINMAXXER-v0.4.4-windows-x64.exe`. Run the local server without the desktop WebView with `minmaxxer.exe --headless`.
+The normal executable is written to `target\release\minmaxxer.exe`. The portable release script uses a clean isolated target, statically links the MSVC runtime, strips local build paths, and writes `dist\MINMAXXER-v0.4.5-windows-x64.exe`. Run the local server without the desktop WebView with `minmaxxer.exe --headless`.
 
 The code is split into a dependency-light parser/analytics crate and a Windows app crate. More detail is in [Architecture](docs/ARCHITECTURE.md).

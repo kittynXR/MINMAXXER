@@ -67,6 +67,8 @@ High-volume world/VRChat implementation noise is not gameplay telemetry: compone
 
 These fields are omitted from default OBS, desktop, and native VR HUDs so they consume no live space. Overlay Studio can opt into a compact browser-only reminder row that labels them `NOT LOGGED`.
 
+Outgoing healing to other players also has an opt-in metric surface for normalized events with an explicit different-player target. The audited vanilla logs contain no such event shape, so the metric presents a no-data state instead of inferring healing from unrelated lines.
+
 - Remote-player damage attribution from a single client's log.
 - Outgoing ability/action names. `STRIKE` and `NON-STRIKE` are the only logged local damage categories, not ability names.
 - Healing or healer attribution.

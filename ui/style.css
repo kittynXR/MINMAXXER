@@ -717,6 +717,12 @@ body[data-overlay="true"] .overlay-root, body[data-forced-overlay="true"] .overl
 .combat-overlay.surface-desktop .overlay-feed>header{min-height:34px;padding:4px 8px}.combat-overlay.surface-desktop .overlay-feed>header span{font-size:10px}.combat-overlay.surface-desktop .overlay-feed>header small{display:none}
 .combat-overlay.surface-desktop .overlay-feed-row{min-height:32px;grid-template-columns:32px 1fr 63px 70px;padding:2px 7px}.combat-overlay.surface-desktop .overlay-feed-row:nth-of-type(n+5){display:none}
 .combat-overlay.surface-desktop .feed-name strong{font-size:11px}.combat-overlay.surface-desktop .feed-name small,.combat-overlay.surface-desktop .hit-age,.combat-overlay.surface-desktop .hit-type,.combat-overlay.surface-desktop .feed-amount{font-size:9px}
+.combat-overlay.surface-desktop .overlay-performance:has(.metric-healing){display:block}
+.combat-overlay.surface-desktop .overlay-totals:has(.metric-healing){display:grid;grid-template-columns:1fr;margin-bottom:5px}
+.combat-overlay.surface-desktop .overlay-totals:has(.metric-healing) .overlay-total{display:none}
+.combat-overlay.surface-desktop .overlay-totals:has(.metric-healing) .metric-healing{display:block;padding:6px 9px}
+.combat-overlay.surface-desktop .metric-healing span{font-size:8px}.combat-overlay.surface-desktop .metric-healing strong{font-size:13px}
+.combat-overlay.surface-desktop:has(.metric-healing) .overlay-feed-row:nth-of-type(n+4){display:none}
 
 .empty-state { min-height:220px; display:grid; place-items:center; padding:30px; color:var(--muted); text-align:center; }.empty-state strong{display:block;color:#c7d1dc;font-size:12px}.empty-state p{max-width:320px;margin:5px 0;font-size:9px}
 

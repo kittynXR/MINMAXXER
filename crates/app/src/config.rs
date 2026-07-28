@@ -54,6 +54,7 @@ pub struct OverlayProfile {
     pub scale: f32,
     pub show_dps: bool,
     pub show_damage: bool,
+    pub show_healing: bool,
     pub show_incoming: bool,
     pub show_hits: bool,
     pub show_recent_hits: bool,
@@ -82,6 +83,7 @@ impl Default for OverlayProfile {
             scale: 1.0,
             show_dps: true,
             show_damage: true,
+            show_healing: false,
             show_incoming: true,
             show_hits: false,
             show_recent_hits: true,
@@ -108,6 +110,7 @@ pub struct AppConfig {
     pub auto_import_recent_logs: bool,
     pub import_days: u32,
     pub boss_target_alert_enabled: bool,
+    pub audio_output_device_id: String,
     pub launch_minimized: bool,
     pub minimize_to_tray: bool,
     pub stream_token: String,
@@ -125,6 +128,7 @@ impl Default for AppConfig {
             auto_import_recent_logs: true,
             import_days: 3,
             boss_target_alert_enabled: true,
+            audio_output_device_id: String::new(),
             launch_minimized: false,
             minimize_to_tray: true,
             stream_token: generate_install_token(),
@@ -249,6 +253,9 @@ impl AppConfig {
         }
         if self.log_directory.as_os_str().is_empty() {
             anyhow::bail!("VRChat log directory cannot be empty");
+        }
+        if self.audio_output_device_id.len() > 2_048 || self.audio_output_device_id.contains('\0') {
+            anyhow::bail!("audio output device ID is invalid");
         }
         if self.stream_token.len() < 32
             || !self
@@ -385,6 +392,36 @@ mod tests {
     }
 
     #[test]
+    fn legacy_configs_follow_the_windows_default_audio_output() {
+        let mut raw = serde_json::to_value(AppConfig::default()).unwrap();
+        raw.as_object_mut()
+            .unwrap()
+            .remove("audio_output_device_id");
+
+        let config: AppConfig = serde_json::from_value(raw).unwrap();
+
+        assert!(config.audio_output_device_id.is_empty());
+    }
+
+    #[test]
+    fn audio_output_device_id_round_trips_and_rejects_embedded_nulls() {
+        let mut config = AppConfig {
+            audio_output_device_id: "{0.0.0.00000000}.example".to_owned(),
+            ..AppConfig::default()
+        };
+        let restored: AppConfig =
+            serde_json::from_value(serde_json::to_value(&config).unwrap()).unwrap();
+        assert_eq!(
+            restored.audio_output_device_id,
+            config.audio_output_device_id
+        );
+        assert!(restored.validate().is_ok());
+
+        config.audio_output_device_id = "invalid\0device".to_owned();
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
     fn legacy_overlay_profiles_inherit_run_context_without_enabling_loadout() {
         let profile: OverlayProfile =
             serde_json::from_value(serde_json::json!({ "id": "legacy" })).unwrap();
@@ -393,8 +430,21 @@ mod tests {
         assert!(profile.show_boss_number);
         assert!(profile.show_graph);
         assert!(profile.show_survival);
+        assert!(!profile.show_healing);
         assert!(!profile.show_telemetry);
         assert!(!profile.show_loadout);
+    }
+
+    #[test]
+    fn outgoing_healing_column_is_opt_in_and_round_trips() {
+        let mut profile = OverlayProfile::default();
+        assert!(!profile.show_healing);
+
+        profile.show_healing = true;
+        let restored: OverlayProfile =
+            serde_json::from_value(serde_json::to_value(profile).unwrap()).unwrap();
+
+        assert!(restored.show_healing);
     }
 
     #[test]

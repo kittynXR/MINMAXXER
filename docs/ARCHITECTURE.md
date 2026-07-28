@@ -17,7 +17,7 @@ VRChat output_log_*.txt
         +-- OBS browser source
         +-- click-through VRChat desktop overlay
         +-- native OpenVR RGBA overlay
-        +-- native WinMM boss-target alert
+        +-- native WASAPI boss-target alert
 ```
 
 ## Resource choices
@@ -29,15 +29,15 @@ VRChat output_log_*.txt
 - Exact-boss ownership lines also enter a discrete, non-coalescing alert channel after their
   storage batch succeeds. Startup, rescan, rotation, and recovery replays contribute only a silent
   final-state baseline before newly appended edges. A dormant async task plays one of two embedded
-  PCM WAV cues through WinMM only on a fresh transition onto the local player, or on a later live
+  PCM WAV cues through the selected WASAPI render endpoint only on a fresh transition onto the local player, or on a later live
   exact-boss ownership transfer from that player to another known player in the same encounter.
-  Identity corrections, expiry, and encounter boundaries stay silent. It adds no decoder, audio
-  engine, polling loop, or browser-audio surface.
+  Identity corrections, expiry, and encounter boundaries stay silent. Endpoint IDs are persisted,
+  refreshed from active Windows devices, and fall back to the multimedia default when unavailable.
 - OBS and desktop overlays reuse the same loopback HTML/CSS/JavaScript assets.
 - Live outgoing hits use a dedicated bounded phase queue rather than the mixed diagnostic-event
   queue. The rows persist through idle gaps, age in place, dim after ten seconds without a hit,
   and clear only on a genuine encounter boundary.
-- The VR overlay avoids a second browser process. It rasterizes a dense HUD with `fontdue`, reuses a 1024 × 512 RGBA allocation, redraws only on changes, and caps OpenVR uploads at 4 Hz. Width, opacity, curvature, and transform writes are cached separately so a texture redraw does not reconfigure the compositor.
+- The VR overlay avoids a second browser process. It rasterizes a dense HUD with `fontdue`, reuses a 1024 × 512 RGBA allocation, redraws only on changes, and caps OpenVR uploads at 4 Hz. Raw uploads are serialized until `VREvent_ImageLoaded`, and the real compositor visibility state is reconciled from overlay events plus a heartbeat. Width, opacity, curvature, and transform writes are cached separately so a texture redraw does not reconfigure the compositor.
 - SteamVR is not initialized until the VR output is enabled.
 
 ## Process boundaries
@@ -58,6 +58,7 @@ The `minmaxxer` app owns Windows integration, persistence, the loopback API, fil
 | `GET /api/runs` | Post-run summaries, newest first. |
 | `GET /api/runs/{id}` | One run and its normalized events. |
 | `GET /api/events` | Raw normalized event explorer. |
+| `GET /api/audio-devices` | Active Windows render endpoints plus the current-system-default choice. |
 | `GET /api/vr-status` | Native OpenVR worker, visibility, placement, and frame status. |
 | `GET/PUT /api/settings` | Persisted overlay and collector configuration. |
 | `POST /api/import` | Multipart VRChat log import. |

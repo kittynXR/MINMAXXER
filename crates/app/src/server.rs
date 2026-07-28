@@ -1,3 +1,4 @@
+use crate::audio_output::{self, AudioOutputDevice};
 use crate::config::{AppConfig, OVERLAY_SETTINGS_SCHEMA_VERSION};
 use crate::storage::Storage;
 use crate::tailer::{CollectorHandle, CollectorSettings};
@@ -60,6 +61,7 @@ pub async fn serve_on(state: ServerState, listener: std::net::TcpListener) -> an
         .route("/api/runs/{id}", get(run_detail))
         .route("/api/events", get(events))
         .route("/api/settings", get(settings).put(update_settings))
+        .route("/api/audio-devices", get(audio_devices))
         .route("/api/vr-status", get(vr_status))
         .route("/api/import", post(import_log))
         .route("/api/rescan", post(rescan))
@@ -263,6 +265,18 @@ async fn settings(State(state): State<ServerState>) -> Response {
         );
     }
     Json(value).into_response()
+}
+
+async fn audio_devices() -> Response {
+    match tokio::task::spawn_blocking(audio_output::output_devices).await {
+        Ok(Ok(devices)) => Json(audio_devices_payload(devices)).into_response(),
+        Ok(Err(error)) => error_response(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+        Err(error) => error_response(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+    }
+}
+
+fn audio_devices_payload(devices: Vec<AudioOutputDevice>) -> Value {
+    json!({ "devices": devices })
 }
 
 async fn update_settings(
@@ -509,6 +523,7 @@ fn apply_compatibility_aliases(base: &mut Value, patch: &Value) {
                     let legacy_run_context = !current_schema && has("encounter");
                     profile["show_dps"] = Value::Bool(has("dps"));
                     profile["show_damage"] = Value::Bool(has("damage"));
+                    profile["show_healing"] = Value::Bool(has("healing"));
                     profile["show_incoming"] = Value::Bool(has("incoming"));
                     profile["show_hits"] = Value::Bool(has("hits"));
                     profile["show_recent_hits"] = Value::Bool(has("recent_hits") || has("hits"));
@@ -557,6 +572,7 @@ fn apply_compatibility_aliases(base: &mut Value, patch: &Value) {
                 let shows_player_metric = shows_outgoing_metric || has("incoming");
                 base["vr_overlay"]["show_rolling_dps"] = Value::Bool(has("dps"));
                 base["vr_overlay"]["show_total_damage"] = Value::Bool(has("damage"));
+                base["vr_overlay"]["show_healing"] = Value::Bool(has("healing"));
                 base["vr_overlay"]["show_incoming"] = Value::Bool(has("incoming"));
                 base["vr_overlay"]["show_players"] = Value::Bool(shows_player_metric);
                 base["vr_overlay"]["show_recent_hits"] =
@@ -864,6 +880,25 @@ mod tests {
     }
 
     #[test]
+    fn settings_ui_refreshes_and_preserves_selectable_audio_outputs() {
+        assert!(INDEX_HTML.contains("id=\"audioOutputDevice\""));
+        assert!(INDEX_HTML.contains("Audio output"));
+        assert!(APP_JS.contains("api(\"/api/audio-devices\", {}, 4000)"));
+        assert!(APP_JS.contains("audio_output_device_id: $(\"#audioOutputDevice\").value"));
+        assert!(APP_JS.contains("Previously selected device (currently unavailable)"));
+        assert!(APP_JS.contains("without changing this choice"));
+
+        let payload = audio_devices_payload(vec![AudioOutputDevice {
+            id: String::new(),
+            name: "System default — Speakers".to_owned(),
+            is_default: true,
+        }]);
+        assert_eq!(payload["devices"][0]["id"], "");
+        assert_eq!(payload["devices"][0]["name"], "System default — Speakers");
+        assert_eq!(payload["devices"][0]["is_default"], true);
+    }
+
+    #[test]
     fn live_huds_label_phase_average_and_dim_persistent_idle_hits() {
         assert!(APP_JS.contains("const HIT_FEED_IDLE_SECONDS = 10"));
         assert!(APP_JS.contains("<span>PHASE AVG</span>"));
@@ -982,6 +1017,23 @@ mod tests {
     }
 
     #[test]
+    fn outgoing_healing_metric_is_opt_in_and_rendered_from_live_player_totals() {
+        assert!(INDEX_HTML.contains("value=\"healing\""));
+        assert!(!INDEX_HTML.contains("value=\"healing\" checked"));
+        assert!(INDEX_HTML.contains("Healing to others"));
+        assert!(APP_JS.contains("if (profile.show_healing) show.push(\"healing\")"));
+        assert!(APP_JS.contains("OUTGOING HEALING TO OTHERS"));
+        assert!(APP_JS
+            .contains("live.players.reduce((sum, player) => sum + number(player.healing), 0)"));
+        assert!(APP_JS.contains("No outgoing healing to another player has been logged"));
+        assert!(APP_JS.contains("missingHealing?\"—\":formatCompact(value)"));
+        assert!(APP_JS.contains("overlay-total metric-${metric}"));
+        assert!(STYLE_CSS.contains(
+            ".combat-overlay.surface-desktop .overlay-performance:has(.metric-healing){display:block}"
+        ));
+    }
+
+    #[test]
     fn overlay_patch_schema_distinguishes_legacy_inheritance_from_explicit_controls() {
         fn profile(base: &Value) -> &Value {
             base["overlay_profiles"]
@@ -1014,6 +1066,7 @@ mod tests {
         let explicit = apply(Some(4), vec!["encounter"]);
         assert_eq!(profile(&explicit)["show_phase"], false);
         assert_eq!(profile(&explicit)["show_boss_number"], false);
+        assert_eq!(profile(&explicit)["show_healing"], false);
         assert_eq!(profile(&explicit)["show_telemetry"], false);
         assert_eq!(profile(&explicit)["show_loadout"], false);
         assert_eq!(explicit["vr_overlay"]["show_phase"], false);
@@ -1043,6 +1096,12 @@ mod tests {
         assert_eq!(incoming_only["vr_overlay"]["show_attacks"], false);
         assert_eq!(incoming_only["vr_overlay"]["show_rolling_dps"], false);
         assert_eq!(incoming_only["vr_overlay"]["show_total_damage"], false);
+
+        let outgoing_healing = apply(Some(4), vec!["healing"]);
+        assert_eq!(profile(&outgoing_healing)["show_healing"], true);
+        assert_eq!(profile(&outgoing_healing)["show_dps"], false);
+        assert_eq!(profile(&outgoing_healing)["show_damage"], false);
+        assert_eq!(outgoing_healing["vr_overlay"]["show_healing"], true);
 
         let old_telemetry = apply(Some(3), vec!["telemetry"]);
         assert_eq!(profile(&old_telemetry)["show_telemetry"], false);

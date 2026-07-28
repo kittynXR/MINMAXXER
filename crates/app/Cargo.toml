@@ -19,6 +19,7 @@ axum = { version = "0.8", features = ["json", "query", "tokio", "http1", "multip
 fontdue = "0.9"
 getrandom = "0.3"
 openvr = "0.9"
+openvr_sys = "2.1.4"
 rusqlite = { version = "0.39", features = ["bundled", "chrono"] }
 sha2 = "0.10"
 tauri = { version = "2.11.5", features = ["tray-icon", "image-png"] }
@@ -30,11 +31,16 @@ url = "2.5"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = [
+  "Win32_Devices_FunctionDiscovery",
   "Win32_Foundation",
   "Win32_Graphics_Gdi",
   "Win32_Media_Audio",
+  "Win32_System_Com",
+  "Win32_System_Com_StructuredStorage",
   "Win32_System_Threading",
+  "Win32_System_Variant",
   "Win32_UI_HiDpi",
+  "Win32_UI_Shell_PropertiesSystem",
   "Win32_UI_WindowsAndMessaging",
 ] }
 

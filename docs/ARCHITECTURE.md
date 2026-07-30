@@ -34,10 +34,14 @@ VRChat output_log_*.txt
   Identity corrections, expiry, and encounter boundaries stay silent. Endpoint IDs are persisted,
   refreshed from active Windows devices, and fall back to the multimedia default when unavailable.
 - OBS and desktop overlays reuse the same loopback HTML/CSS/JavaScript assets.
+- Fresh configurations select the Target-only profile for browser, desktop, and native VR
+  output. Legacy serde field defaults remain dense so loading an existing saved Broadcast
+  selection never silently changes its profile.
 - Live outgoing hits use a dedicated bounded phase queue rather than the mixed diagnostic-event
   queue. The rows persist through idle gaps, age in place, dim after ten seconds without a hit,
   and clear only on a genuine encounter boundary.
-- The VR overlay avoids a second browser process. It rasterizes a dense HUD with `fontdue`, reuses a 1024 × 512 RGBA allocation, redraws only on changes, and caps OpenVR uploads at 4 Hz. Raw uploads are serialized until `VREvent_ImageLoaded`, and the real compositor visibility state is reconciled from overlay events plus a heartbeat. Width, opacity, curvature, and transform writes are cached separately so a texture redraw does not reconfigure the compositor.
+- The VR overlay avoids a second browser process. It rasterizes either the dense combat HUD or the target-only presentation with `fontdue`, reuses a 1024 × 512 RGBA allocation, redraws only on changes, and caps OpenVR uploads at 4 Hz. Raw uploads are serialized until `VREvent_ImageLoaded`, and the real compositor visibility state is reconciled from overlay events plus a heartbeat. Width, opacity, curvature, and transform writes are cached separately so a texture redraw does not reconfigure the compositor.
+- Boss ownership updates retain the exact previous player. Personal targeted/released cues take precedence; an independently configurable, synthesized low-amplitude handoff cue covers other player-to-player transfers without double-playing an edge.
 - SteamVR is not initialized until the VR output is enabled.
 
 ## Process boundaries

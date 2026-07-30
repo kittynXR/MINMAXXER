@@ -460,11 +460,18 @@ fn apply_compatibility_aliases(base: &mut Value, patch: &Value) {
     if let Some(overlay) = patch.get("overlay") {
         let overlay_object = overlay.as_object();
         if let Some(object) = overlay_object {
+            let active_profile = base
+                .get("desktop_overlay")
+                .and_then(|desktop| desktop.get("profile"))
+                .and_then(Value::as_str)
+                .filter(|profile| matches!(*profile, "broadcast" | "minimal" | "vr" | "target"))
+                .unwrap_or("target")
+                .to_owned();
             let requested_profile = object
                 .get("profile")
                 .and_then(Value::as_str)
-                .filter(|profile| matches!(*profile, "broadcast" | "minimal" | "vr"))
-                .unwrap_or("broadcast")
+                .filter(|profile| matches!(*profile, "broadcast" | "minimal" | "vr" | "target"))
+                .unwrap_or(active_profile.as_str())
                 .to_owned();
             let profile_index = base
                 .get_mut("overlay_profiles")
@@ -482,6 +489,7 @@ fn apply_compatibility_aliases(base: &mut Value, patch: &Value) {
                         match requested_profile.as_str() {
                             "minimal" => "Minimal HUD",
                             "vr" => "VR HUD",
+                            "target" => "Target-only HUD",
                             _ => "Broadcast HUD",
                         }
                         .to_owned(),
@@ -489,7 +497,8 @@ fn apply_compatibility_aliases(base: &mut Value, patch: &Value) {
                     profiles.push(profile);
                     profiles.len() - 1
                 });
-            base["desktop_overlay"]["profile"] = Value::String(requested_profile);
+            base["desktop_overlay"]["profile"] = Value::String(requested_profile.clone());
+            base["vr_overlay"]["target_only"] = Value::Bool(requested_profile == "target");
 
             if let Some(profile) = profile_index.and_then(|index| {
                 base.get_mut("overlay_profiles")
@@ -523,7 +532,9 @@ fn apply_compatibility_aliases(base: &mut Value, patch: &Value) {
                     let legacy_run_context = !current_schema && has("encounter");
                     profile["show_dps"] = Value::Bool(has("dps"));
                     profile["show_damage"] = Value::Bool(has("damage"));
-                    profile["show_healing"] = Value::Bool(has("healing"));
+                    // Healing fields stay serialized for forward compatibility, but the
+                    // audited game log does not currently expose them. Preserve the stored
+                    // preference while every renderer capability-gates it off.
                     profile["show_incoming"] = Value::Bool(has("incoming"));
                     profile["show_hits"] = Value::Bool(has("hits"));
                     profile["show_recent_hits"] = Value::Bool(has("recent_hits") || has("hits"));
@@ -572,7 +583,7 @@ fn apply_compatibility_aliases(base: &mut Value, patch: &Value) {
                 let shows_player_metric = shows_outgoing_metric || has("incoming");
                 base["vr_overlay"]["show_rolling_dps"] = Value::Bool(has("dps"));
                 base["vr_overlay"]["show_total_damage"] = Value::Bool(has("damage"));
-                base["vr_overlay"]["show_healing"] = Value::Bool(has("healing"));
+                // Preserve the dormant healing preference until a real log format proves it.
                 base["vr_overlay"]["show_incoming"] = Value::Bool(has("incoming"));
                 base["vr_overlay"]["show_players"] = Value::Bool(shows_player_metric);
                 base["vr_overlay"]["show_recent_hits"] =
@@ -860,22 +871,28 @@ mod tests {
         assert!(hydration.contains("!input.disabled"));
         assert!(APP_JS.contains("function queueOverlayProfileSave(options)"));
         assert!(!APP_JS.contains("if (!outputsEnabled()) return"));
-        assert!(hydration.contains("profile.accent === \"#8ff0cf\" ? \"mint\""));
+        assert!(hydration.contains("resolved.accent === \"#8ff0cf\" ? \"mint\""));
         assert!(INDEX_HTML.contains("Loadout unavailable (not logged)"));
         assert!(INDEX_HTML.contains("value=\"loadout\" disabled"));
     }
 
     #[test]
-    fn settings_ui_wires_the_native_boss_target_audio_cue_toggle() {
+    fn settings_ui_wires_personal_and_handoff_boss_target_audio_cues() {
         assert!(INDEX_HTML.contains("id=\"bossTargetAlertToggle\""));
-        assert!(INDEX_HTML.contains("Boss-target audio cues"));
+        assert!(INDEX_HTML.contains("Personal boss-target cues"));
         assert!(INDEX_HTML.contains("softer all-clear"));
+        assert!(INDEX_HTML.contains("id=\"bossTargetHandoffAlertToggle\""));
+        assert!(INDEX_HTML.contains("Gentle boss-target handoff cue"));
         assert!(APP_JS.contains("state.settings.boss_target_alert_enabled ?? true"));
+        assert!(APP_JS.contains("state.settings.boss_target_handoff_alert_enabled ?? false"));
         assert!(APP_JS.contains(
             "boss_target_alert_enabled: $(\"#bossTargetAlertToggle\").getAttribute(\"aria-checked\") === \"true\""
         ));
         assert!(APP_JS.contains(
-            "\"#autoImportToggle\", \"#bossTargetAlertToggle\", \"#launchMinimizedToggle\""
+            "boss_target_handoff_alert_enabled: $(\"#bossTargetHandoffAlertToggle\").getAttribute(\"aria-checked\") === \"true\""
+        ));
+        assert!(APP_JS.contains(
+            "\"#autoImportToggle\", \"#bossTargetAlertToggle\", \"#bossTargetHandoffAlertToggle\""
         ));
     }
 
@@ -932,8 +949,8 @@ mod tests {
         assert!(hydration.contains("Boolean(local?.backendPending)"));
         assert!(hydration
             .contains("migrateLocal || retryLocal ? local : studioOptionsFromSettings() || local"));
-        assert!(hydration.contains("restoredShow.add(\"phase\")"));
-        assert!(hydration.contains("restoredShow.add(\"boss\")"));
+        assert!(APP_JS.contains("restoredShow.add(\"phase\")"));
+        assert!(APP_JS.contains("restoredShow.add(\"boss\")"));
         assert!(hydration.contains("queueOverlayProfileSave(migrated)"));
         assert!(save_helpers.contains("backendPending: state.studioBackendPending"));
         assert!(save_helpers.contains("state.studioBackendPending = false"));
@@ -989,6 +1006,28 @@ mod tests {
     }
 
     #[test]
+    fn target_only_profile_has_a_compact_handoff_aware_browser_presentation() {
+        assert!(INDEX_HTML.contains("class=\"profile-card active\" data-profile=\"target\""));
+        assert!(!INDEX_HTML.contains("class=\"profile-card active\" data-profile=\"broadcast\""));
+        assert!(INDEX_HTML.contains("Target only"));
+        assert!(APP_JS.contains("\"broadcast\", \"minimal\", \"vr\", \"target\""));
+        assert!(APP_JS.contains("hitMode ? \"broadcast\" : \"target\""));
+        assert!(APP_JS.contains("profile === \"target\" ? [\"focus\"]"));
+        assert!(APP_JS.contains("broadcast: { layout: \"landscape\", accent: \"cyan\", rows: 8"));
+        assert!(APP_JS.contains("function targetHandoffState(root, live)"));
+        assert!(APP_JS.contains("previousPlayer.localeCompare(current"));
+        assert!(APP_JS.contains("Date.now() + 900"));
+        assert!(APP_JS.contains("root.dataset.targetAnimateUntil"));
+        assert!(APP_JS.contains("profile === \"target\" ? [\"focus\"]"));
+        assert!(APP_JS.contains("Target-only · set the Browser Source to 720 × 180"));
+        assert!(STYLE_CSS.contains(".combat-overlay.target-only-overlay"));
+        assert!(STYLE_CSS.contains(".target-only-overlay.target-handoff .target-name"));
+        assert!(STYLE_CSS.contains("width:720px"));
+        assert!(STYLE_CSS.contains("max-height:180px"));
+        assert!(STYLE_CSS.contains("prefers-reduced-motion: reduce"));
+    }
+
+    #[test]
     fn browser_overlay_allows_context_only_and_explicitly_empty_visibility() {
         let options_start = APP_JS
             .find("function overlayOptionsFromSearch")
@@ -1017,30 +1056,29 @@ mod tests {
     }
 
     #[test]
-    fn outgoing_healing_metric_is_opt_in_and_rendered_from_live_player_totals() {
+    fn unavailable_healing_is_grayed_out_and_filtered_from_live_overlays() {
         assert!(INDEX_HTML.contains("value=\"healing\""));
-        assert!(!INDEX_HTML.contains("value=\"healing\" checked"));
-        assert!(INDEX_HTML.contains("Healing to others"));
-        assert!(APP_JS.contains("if (profile.show_healing) show.push(\"healing\")"));
-        assert!(APP_JS.contains("OUTGOING HEALING TO OTHERS"));
-        assert!(APP_JS
-            .contains("live.players.reduce((sum, player) => sum + number(player.healing), 0)"));
-        assert!(APP_JS.contains("No outgoing healing to another player has been logged"));
-        assert!(APP_JS.contains("missingHealing?\"—\":formatCompact(value)"));
-        assert!(APP_JS.contains("overlay-total metric-${metric}"));
-        assert!(STYLE_CSS.contains(
-            ".combat-overlay.surface-desktop .overlay-performance:has(.metric-healing){display:block}"
-        ));
+        assert!(INDEX_HTML.contains("value=\"healing\" disabled"));
+        assert!(INDEX_HTML.contains("Healing · not logged"));
+        assert!(INDEX_HTML.contains("HEALING · NOT LOGGED"));
+        assert!(APP_JS.contains("restoredShow.delete(\"healing\")"));
+        assert!(!APP_JS.contains("OUTGOING HEALING TO OTHERS"));
+        assert!(!APP_JS.contains("if (profile.show_healing) show.push(\"healing\")"));
+        assert!(APP_JS.contains("const supported = [\"dps\", \"damage\", \"incoming\""));
+        assert!(APP_JS.contains("HP gain and healing are not logged"));
+        assert!(STYLE_CSS.contains(".metric-card.unavailable-metric"));
+        assert!(STYLE_CSS.contains(".show-options label.unavailable-option"));
     }
 
     #[test]
     fn overlay_patch_schema_distinguishes_legacy_inheritance_from_explicit_controls() {
         fn profile(base: &Value) -> &Value {
+            let active_profile = base["desktop_overlay"]["profile"].as_str().unwrap();
             base["overlay_profiles"]
                 .as_array()
                 .unwrap()
                 .iter()
-                .find(|profile| profile["id"] == "broadcast")
+                .find(|profile| profile["id"] == active_profile)
                 .unwrap()
         }
 
@@ -1098,10 +1136,29 @@ mod tests {
         assert_eq!(incoming_only["vr_overlay"]["show_total_damage"], false);
 
         let outgoing_healing = apply(Some(4), vec!["healing"]);
-        assert_eq!(profile(&outgoing_healing)["show_healing"], true);
+        assert_eq!(profile(&outgoing_healing)["show_healing"], false);
         assert_eq!(profile(&outgoing_healing)["show_dps"], false);
         assert_eq!(profile(&outgoing_healing)["show_damage"], false);
-        assert_eq!(outgoing_healing["vr_overlay"]["show_healing"], true);
+        assert_eq!(outgoing_healing["vr_overlay"]["show_healing"], false);
+
+        let mut preserved = serde_json::to_value(AppConfig::default()).unwrap();
+        let active_profile = preserved["desktop_overlay"]["profile"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        preserved["overlay_profiles"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|profile| profile["id"] == active_profile)
+            .unwrap()["show_healing"] = json!(true);
+        preserved["vr_overlay"]["show_healing"] = json!(true);
+        apply_compatibility_aliases(
+            &mut preserved,
+            &json!({ "overlay": { "schema_version": 4, "show": ["focus"] } }),
+        );
+        assert_eq!(profile(&preserved)["show_healing"], true);
+        assert_eq!(preserved["vr_overlay"]["show_healing"], true);
 
         let old_telemetry = apply(Some(3), vec!["telemetry"]);
         assert_eq!(profile(&old_telemetry)["show_telemetry"], false);
@@ -1143,5 +1200,40 @@ mod tests {
         assert_eq!(profile["theme"], "glass");
         assert_eq!(profile["accent"], "mint");
         assert_eq!(profile["scale"], 1.15);
+    }
+
+    #[test]
+    fn target_profile_selects_target_only_browser_desktop_and_native_vr_outputs() {
+        let mut base = serde_json::to_value(AppConfig::default()).unwrap();
+        apply_compatibility_aliases(
+            &mut base,
+            &json!({
+                "overlay": {
+                    "profile": "target",
+                    "schema_version": 4,
+                    "show": ["focus"]
+                }
+            }),
+        );
+
+        assert_eq!(base["desktop_overlay"]["profile"], "target");
+        assert_eq!(base["vr_overlay"]["target_only"], true);
+        assert_eq!(base["vr_overlay"]["show_focus"], true);
+        assert_eq!(base["vr_overlay"]["show_players"], false);
+        let profile = base["overlay_profiles"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|profile| profile["id"] == "target")
+            .unwrap();
+        assert_eq!(profile["name"], "Target-only HUD");
+        assert_eq!(profile["show_focus"], true);
+        assert_eq!(profile["show_dps"], false);
+
+        apply_compatibility_aliases(
+            &mut base,
+            &json!({ "overlay": { "profile": "broadcast", "show": ["focus"] } }),
+        );
+        assert_eq!(base["vr_overlay"]["target_only"], false);
     }
 }

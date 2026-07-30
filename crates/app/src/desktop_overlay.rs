@@ -13,6 +13,9 @@ use tokio::sync::watch;
 use url::Url;
 
 const WINDOW_LABEL: &str = "desktop-overlay";
+// Vanilla Ecliptica logs do not currently expose attributable healing or HP-gain events. Keep
+// the serialized preference for compatibility, but do not advertise an unavailable metric.
+const HEALING_TELEMETRY_AVAILABLE: bool = false;
 
 #[derive(Debug, Clone)]
 pub struct DesktopOverlayRuntimeConfig {
@@ -139,7 +142,7 @@ fn overlay_url(origin: &Url, runtime: &DesktopOverlayRuntimeConfig) -> Url {
     let profile = &runtime.profile;
     let settings = &runtime.settings;
     let renderer_profile = match profile.id.as_str() {
-        "broadcast" | "minimal" | "vr" => profile.id.as_str(),
+        "broadcast" | "minimal" | "vr" | "target" => profile.id.as_str(),
         _ => "broadcast",
     };
     // The click-through desktop surface uses the same dense composition as OBS, then applies
@@ -161,7 +164,7 @@ fn overlay_url(origin: &Url, runtime: &DesktopOverlayRuntimeConfig) -> Url {
     if profile.show_damage {
         show.push("damage");
     }
-    if profile.show_healing {
+    if HEALING_TELEMETRY_AVAILABLE && profile.show_healing {
         show.push("healing");
     }
     if profile.show_incoming {
@@ -311,38 +314,43 @@ fn update_window_placement(window: &WebviewWindow, settings: &DesktopOverlaySett
 mod tests {
     use super::*;
 
+    fn selected_profile_mut(config: &mut AppConfig) -> &mut OverlayProfile {
+        config
+            .overlay_profiles
+            .iter_mut()
+            .find(|profile| profile.id == config.desktop_overlay.profile)
+            .expect("the selected desktop profile should exist")
+    }
+
     #[test]
     fn desktop_url_contains_resolved_profile_and_opacity() {
         let mut config = AppConfig::default();
         config.desktop_overlay.opacity = 0.64;
-        config.overlay_profiles[0].show_focus = true;
         let runtime = DesktopOverlayRuntimeConfig::from_app_config(&config);
         let url = overlay_url(&Url::parse("http://127.0.0.1:49321").unwrap(), &runtime);
         let query: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
         let show: std::collections::HashSet<_> = query.get("show").unwrap().split(',').collect();
         assert_eq!(query.get("ui").map(String::as_str), Some("4"));
-        assert_eq!(query.get("profile").map(String::as_str), Some("broadcast"));
+        assert_eq!(query.get("profile").map(String::as_str), Some("target"));
         assert_eq!(query.get("layout").map(String::as_str), Some("landscape"));
-        assert_eq!(query.get("rows").map(String::as_str), Some("2"));
-        assert_eq!(query.get("hit_rows").map(String::as_str), Some("2"));
+        assert_eq!(query.get("rows").map(String::as_str), Some("1"));
+        assert_eq!(query.get("hit_rows").map(String::as_str), Some("1"));
         assert_eq!(query.get("scale").map(String::as_str), Some("100"));
         assert_eq!(query.get("bg").map(String::as_str), Some("64"));
-        assert!(show.contains("encounter"));
-        assert!(show.contains("phase"));
-        assert!(show.contains("boss"));
         assert!(show.contains("focus"));
-        assert!(show.contains("graph"));
-        assert!(show.contains("survival"));
+        assert_eq!(show.len(), 1);
         assert!(!show.contains("healing"));
         assert!(!show.contains("telemetry"));
         assert!(!show.contains("loadout"));
     }
 
     #[test]
-    fn desktop_url_includes_outgoing_healing_only_after_profile_opt_in() {
+    fn desktop_url_ignores_preserved_healing_preference_while_telemetry_is_unavailable() {
         let mut config = AppConfig::default();
-        config.overlay_profiles[0].show_healing = true;
+        selected_profile_mut(&mut config).show_healing = true;
         let runtime = DesktopOverlayRuntimeConfig::from_app_config(&config);
+        assert!(runtime.profile.show_healing);
+
         let url = overlay_url(&Url::parse("http://127.0.0.1:49321").unwrap(), &runtime);
         let show = url
             .query_pairs()
@@ -350,13 +358,13 @@ mod tests {
             .map(|(_, value)| value.into_owned())
             .unwrap();
 
-        assert!(show.split(',').any(|item| item == "healing"));
+        assert!(!show.split(',').any(|item| item == "healing"));
     }
 
     #[test]
     fn desktop_url_includes_unavailable_telemetry_only_after_opt_in() {
         let mut config = AppConfig::default();
-        config.overlay_profiles[0].show_telemetry = true;
+        selected_profile_mut(&mut config).show_telemetry = true;
         let runtime = DesktopOverlayRuntimeConfig::from_app_config(&config);
         let url = overlay_url(&Url::parse("http://127.0.0.1:49321").unwrap(), &runtime);
         let show = url
@@ -371,7 +379,7 @@ mod tests {
     #[test]
     fn desktop_url_only_includes_loadout_after_profile_opt_in() {
         let mut config = AppConfig::default();
-        config.overlay_profiles[0].show_loadout = true;
+        selected_profile_mut(&mut config).show_loadout = true;
         let runtime = DesktopOverlayRuntimeConfig::from_app_config(&config);
         let url = overlay_url(&Url::parse("http://127.0.0.1:49321").unwrap(), &runtime);
         let show = url
@@ -383,5 +391,32 @@ mod tests {
 
         assert!(show.split(',').any(|item| item == "loadout"));
         assert_eq!(query.get("rows").map(String::as_str), Some("1"));
+    }
+
+    #[test]
+    fn desktop_url_preserves_the_target_only_profile() {
+        let config = AppConfig::default();
+        let runtime = DesktopOverlayRuntimeConfig::from_app_config(&config);
+        let url = overlay_url(&Url::parse("http://127.0.0.1:49321").unwrap(), &runtime);
+        let query: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
+
+        assert_eq!(query.get("profile").map(String::as_str), Some("target"));
+        assert!(query
+            .get("show")
+            .is_some_and(|show| show.split(',').any(|item| item == "focus")));
+    }
+
+    #[test]
+    fn desktop_url_preserves_an_existing_broadcast_selection() {
+        let mut config = AppConfig::default();
+        config.desktop_overlay.profile = "broadcast".to_owned();
+        let runtime = DesktopOverlayRuntimeConfig::from_app_config(&config);
+        let url = overlay_url(&Url::parse("http://127.0.0.1:49321").unwrap(), &runtime);
+        let query: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
+
+        assert_eq!(query.get("profile").map(String::as_str), Some("broadcast"));
+        assert!(query
+            .get("show")
+            .is_some_and(|show| show.split(',').any(|item| item == "dps")));
     }
 }

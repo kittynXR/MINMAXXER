@@ -32,6 +32,9 @@ const TEXTURE_UPLOAD_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_CONSECUTIVE_SESSION_FAILURES: u8 = 3;
 const CONTROLLER_IDLE_INTERVAL: Duration = Duration::from_millis(50);
 const CONTROLLER_PLACING_INTERVAL: Duration = Duration::from_millis(16);
+// Vanilla Ecliptica logs do not currently expose attributable healing or HP-gain events. Keep
+// the serialized preference for compatibility, but do not render an unavailable metric.
+const HEALING_TELEMETRY_AVAILABLE: bool = false;
 
 // openvr 0.9's safe-looking `create_overlay(&str, &str)` wrapper forwards `str::as_ptr()` to a C
 // API without appending a terminator. These constants MUST retain their trailing NUL bytes.
@@ -51,6 +54,7 @@ const OVERLAY_NAME: &str = "MINMAXXER Ecliptica HUD\0";
 #[serde(default)]
 pub struct VrOverlaySettings {
     pub enabled: bool,
+    pub target_only: bool,
     pub width_m: f32,
     pub x: f32,
     pub y: f32,
@@ -79,6 +83,7 @@ impl Default for VrOverlaySettings {
     fn default() -> Self {
         Self {
             enabled: false,
+            target_only: false,
             width_m: 0.86,
             x: 0.30,
             y: 0.08,
@@ -1600,6 +1605,11 @@ fn render_frame(
         pixels.len(),
         HUD_TEXTURE_WIDTH * HUD_TEXTURE_HEIGHT * HUD_BYTES_PER_PIXEL
     );
+    if settings.target_only {
+        render_target_only_frame(font, glyphs, pixels, snapshot, settings, placement_state);
+        return;
+    }
+
     fill_rounded_rect(pixels, 8, 8, 1008, 496, 22, PANEL);
     fill_rounded_rect(pixels, 24, 23, 8, 48, 4, CYAN);
     draw_text(font, glyphs, pixels, "MINMAXXER", 44, 64, 36, WHITE, 340);
@@ -1684,6 +1694,189 @@ fn render_frame(
         LIVE_PANEL_Y,
         316,
         LIVE_PANEL_HEIGHT,
+    );
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TargetOnlyPresentation {
+    boss_context: String,
+    target: String,
+    detail: String,
+    has_focus: bool,
+}
+
+fn target_only_presentation(snapshot: &EngineSnapshot) -> TargetOnlyPresentation {
+    let active_boss = snapshot.encounter.active
+        && snapshot.encounter.kind == "boss"
+        && !snapshot.encounter.name.trim().is_empty();
+    let boss_context = if active_boss {
+        let boss = friendly_entity_label(&snapshot.encounter.name);
+        snapshot
+            .run_context
+            .boss_number
+            .map(|round| {
+                let inferred = if snapshot.run_context.boss_number_inferred {
+                    "~"
+                } else {
+                    ""
+                };
+                format!("ROUND {inferred}{round:02}/13  -  {boss}")
+            })
+            .unwrap_or_else(|| format!("CURRENT BOSS  -  {boss}"))
+    } else {
+        "ECLIPTICA  -  WAITING FOR THE NEXT BOSS".to_owned()
+    };
+
+    if active_boss {
+        if let Some(focus) = snapshot.focus.as_ref() {
+            let confidence = if focus.confidence.trim().is_empty() {
+                "UNKNOWN".to_owned()
+            } else {
+                focus.confidence.trim().to_ascii_uppercase()
+            };
+            let age = if focus.age_seconds.is_finite() {
+                format_age(focus.age_seconds.max(0.0))
+            } else {
+                "--".to_owned()
+            };
+            return TargetOnlyPresentation {
+                boss_context,
+                target: focus.player.trim().to_ascii_uppercase(),
+                detail: format!(
+                    "{confidence} CONFIDENCE  -  NETWORK-OWNERSHIP PROXY  -  {age} OLD"
+                ),
+                has_focus: true,
+            };
+        }
+        TargetOnlyPresentation {
+            boss_context,
+            target: "ACQUIRING TARGET".to_owned(),
+            detail: "WAITING FOR THE BOSS NETWORK-OWNERSHIP SIGNAL".to_owned(),
+            has_focus: false,
+        }
+    } else {
+        TargetOnlyPresentation {
+            boss_context,
+            target: "NO ACTIVE BOSS".to_owned(),
+            detail: "THE TARGET SIGNAL WILL APPEAR WHEN BOSS COMBAT STARTS".to_owned(),
+            has_focus: false,
+        }
+    }
+}
+
+fn render_target_only_frame(
+    font: &Font,
+    glyphs: &mut HashMap<GlyphKey, CachedGlyph>,
+    pixels: &mut [u8],
+    snapshot: &EngineSnapshot,
+    settings: &VrOverlaySettings,
+    placement_state: VrPlacementState,
+) {
+    let presentation = target_only_presentation(snapshot);
+    fill_rounded_rect(pixels, 62, 46, 900, 430, 30, Color(0, 0, 0, 92));
+    fill_rounded_rect(pixels, 72, 36, 880, 430, 28, PANEL);
+    fill_rounded_rect(pixels, 72, 36, 8, 430, 4, CYAN);
+    fill_rounded_rect(pixels, 96, 111, 832, 2, 1, Color(63, 220, 255, 80));
+
+    draw_text(font, glyphs, pixels, "MINMAXXER", 102, 83, 20, WHITE, 220);
+    draw_text(
+        font,
+        glyphs,
+        pixels,
+        "BOSS TARGET MONITOR",
+        102,
+        104,
+        13,
+        CYAN,
+        280,
+    );
+    if settings.show_status {
+        let indicator = if snapshot.connected { GREEN } else { ORANGE };
+        fill_circle(pixels, 906, 68, 6, indicator);
+        draw_text_right(
+            font,
+            glyphs,
+            pixels,
+            if snapshot.connected {
+                "LOG LIVE"
+            } else {
+                "WAITING"
+            },
+            891,
+            74,
+            14,
+            indicator,
+            140,
+        );
+    }
+
+    draw_text_centered(
+        font,
+        glyphs,
+        pixels,
+        &presentation.boss_context,
+        512,
+        148,
+        20,
+        MUTED,
+        780,
+    );
+    draw_text_centered(
+        font,
+        glyphs,
+        pixels,
+        "CURRENT BOSS TARGET",
+        512,
+        205,
+        17,
+        CYAN,
+        600,
+    );
+    let target_size = fitted_text_size(font, &presentation.target, 760, 68, 34);
+    draw_text_centered(
+        font,
+        glyphs,
+        pixels,
+        &presentation.target,
+        512,
+        294,
+        target_size,
+        if presentation.has_focus {
+            ORANGE
+        } else {
+            MUTED
+        },
+        760,
+    );
+    draw_text_centered(
+        font,
+        glyphs,
+        pixels,
+        &presentation.detail,
+        512,
+        337,
+        16,
+        if presentation.has_focus { WHITE } else { DIM },
+        780,
+    );
+
+    fill_rounded_rect(pixels, 142, 370, 740, 48, 12, PANEL_ALT);
+    let footer = placement_header(placement_state)
+        .map(|(message, _)| message)
+        .unwrap_or("PROXY SIGNAL  -  NOT AN AUTHORITATIVE AGGRO TABLE");
+    let footer_color = placement_header(placement_state)
+        .map(|(_, color)| color)
+        .unwrap_or(DIM);
+    draw_text_centered(
+        font,
+        glyphs,
+        pixels,
+        footer,
+        512,
+        401,
+        14,
+        footer_color,
+        700,
     );
 }
 
@@ -1907,17 +2100,18 @@ fn dps_footer_metrics(
     settings: &VrOverlaySettings,
 ) -> Vec<(&'static str, String, Color)> {
     let mut metrics = Vec::with_capacity(2);
+    let show_healing = HEALING_TELEMETRY_AVAILABLE && settings.show_healing;
     if settings.show_total_damage {
         metrics.push((
             "SEGMENT DAMAGE",
             compact_number(snapshot.outgoing.total),
             VIOLET,
         ));
-    } else if !settings.show_healing {
+    } else if !show_healing {
         // Preserve the established disabled state when neither optional footer metric is selected.
         metrics.push(("SEGMENT DAMAGE", "HIDDEN".to_owned(), VIOLET));
     }
-    if settings.show_healing {
+    if show_healing {
         let healing = outgoing_healing_total(snapshot);
         metrics.push((
             "HEALING TO OTHERS",
@@ -2857,6 +3051,47 @@ fn draw_text_right(
     );
 }
 
+#[allow(clippy::too_many_arguments)]
+fn draw_text_centered(
+    font: &Font,
+    glyphs: &mut HashMap<GlyphKey, CachedGlyph>,
+    pixels: &mut [u8],
+    text: &str,
+    center_x: i32,
+    baseline_y: i32,
+    pixel_size: u16,
+    color: Color,
+    maximum_width: i32,
+) {
+    let visible_width =
+        (measure_text(font, text, pixel_size).ceil() as i32).min(maximum_width.max(0));
+    draw_text(
+        font,
+        glyphs,
+        pixels,
+        text,
+        center_x - visible_width / 2,
+        baseline_y,
+        pixel_size,
+        color,
+        visible_width,
+    );
+}
+
+fn fitted_text_size(
+    font: &Font,
+    text: &str,
+    maximum_width: i32,
+    preferred: u16,
+    minimum: u16,
+) -> u16 {
+    let mut size = preferred.max(minimum);
+    while size > minimum && measure_text(font, text, size) > maximum_width as f32 {
+        size -= 1;
+    }
+    size
+}
+
 fn measure_text(font: &Font, text: &str, pixel_size: u16) -> f32 {
     let size = pixel_size as f32;
     let mut width = 0.0;
@@ -3026,6 +3261,7 @@ mod tests {
     fn legacy_vr_settings_inherit_run_context_without_enabling_loadout() {
         let settings: VrOverlaySettings = serde_json::from_value(serde_json::json!({})).unwrap();
 
+        assert!(!settings.target_only);
         assert!(settings.show_phase);
         assert!(settings.show_boss_number);
         assert!(!settings.show_healing);
@@ -3033,7 +3269,19 @@ mod tests {
     }
 
     #[test]
-    fn outgoing_healing_is_an_opt_in_sanitized_vr_setting() {
+    fn target_only_mode_is_opt_in_and_round_trips_without_changing_legacy_defaults() {
+        let settings: VrOverlaySettings = serde_json::from_value(serde_json::json!({
+            "target_only": true
+        }))
+        .unwrap();
+
+        assert!(settings.sanitized().target_only);
+        assert_eq!(serde_json::to_value(settings).unwrap()["target_only"], true);
+        assert!(!VrOverlaySettings::default().target_only);
+    }
+
+    #[test]
+    fn reserved_outgoing_healing_preference_survives_vr_sanitization() {
         let settings: VrOverlaySettings = serde_json::from_value(serde_json::json!({
             "show_healing": true
         }))
@@ -3129,7 +3377,7 @@ mod tests {
     }
 
     #[test]
-    fn native_dps_footer_splits_damage_and_outgoing_healing_only_when_selected() {
+    fn native_dps_footer_ignores_preserved_healing_preference_while_unavailable() {
         let snapshot = EngineSnapshot {
             outgoing: DamageTotals {
                 total: 12_000.0,
@@ -3159,20 +3407,19 @@ mod tests {
         assert_eq!(damage_only[0].1, "12.0k");
 
         settings.show_healing = true;
-        let split = dps_footer_metrics(&snapshot, &settings);
-        assert_eq!(split.len(), 2);
-        assert_eq!(split[0].0, "SEGMENT DAMAGE");
-        assert_eq!(split[1].0, "HEALING TO OTHERS");
-        assert_eq!(split[1].1, "3.2k");
+        let preserved_preference = dps_footer_metrics(&snapshot, &settings);
+        assert_eq!(preserved_preference.len(), 1);
+        assert_eq!(preserved_preference[0].0, damage_only[0].0);
+        assert_eq!(preserved_preference[0].1, damage_only[0].1);
+        assert!(preserved_preference
+            .iter()
+            .all(|(label, _, _)| !label.contains("HEAL")));
 
         settings.show_total_damage = false;
-        let healing_only = dps_footer_metrics(&snapshot, &settings);
-        assert_eq!(healing_only.len(), 1);
-        assert_eq!(healing_only[0].0, "HEALING TO OTHERS");
-        assert_eq!(healing_only[0].1, "3.2k");
-
-        let no_healing_data = dps_footer_metrics(&EngineSnapshot::default(), &settings);
-        assert_eq!(no_healing_data[0].1, "NO DATA");
+        let unavailable_healing_only = dps_footer_metrics(&snapshot, &settings);
+        assert_eq!(unavailable_healing_only.len(), 1);
+        assert_eq!(unavailable_healing_only[0].0, "SEGMENT DAMAGE");
+        assert_eq!(unavailable_healing_only[0].1, "HIDDEN");
     }
 
     #[test]
@@ -3504,6 +3751,46 @@ mod tests {
     }
 
     #[test]
+    fn target_only_presentation_names_the_boss_target_and_proxy_confidence() {
+        let time = NaiveDate::from_ymd_opt(2026, 7, 22)
+            .unwrap()
+            .and_hms_opt(23, 14, 40)
+            .unwrap();
+        let snapshot = EngineSnapshot {
+            encounter: minmaxxer_core::aggregate::LiveEncounter {
+                name: "CorusPhase2".to_owned(),
+                kind: "boss".to_owned(),
+                active: true,
+                ..minmaxxer_core::aggregate::LiveEncounter::default()
+            },
+            run_context: minmaxxer_core::RunContext {
+                boss_number: Some(9),
+                ..minmaxxer_core::RunContext::default()
+            },
+            focus: Some(minmaxxer_core::aggregate::FocusSignal {
+                player: "Local Player".to_owned(),
+                entity: "CorusPhase2".to_owned(),
+                observed_at: time,
+                age_seconds: 2.0,
+                confidence: "likely".to_owned(),
+                evidence: "boss_network_ownership".to_owned(),
+                corroborating_hits: 0,
+                corroborated_at: None,
+                source_note: "Not authoritative hate.".to_owned(),
+            }),
+            ..EngineSnapshot::default()
+        };
+
+        let presentation = target_only_presentation(&snapshot);
+
+        assert_eq!(presentation.boss_context, "ROUND 09/13  -  CORUS PHASE 2");
+        assert_eq!(presentation.target, "LOCAL PLAYER");
+        assert!(presentation.detail.contains("LIKELY CONFIDENCE"));
+        assert!(presentation.detail.contains("NETWORK-OWNERSHIP PROXY"));
+        assert!(presentation.has_focus);
+    }
+
+    #[test]
     fn incoming_feed_uses_newest_damage_taken_and_prettifies_raw_sources() {
         let time = NaiveDate::from_ymd_opt(2026, 7, 22)
             .unwrap()
@@ -3581,7 +3868,7 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     #[test]
-    fn outgoing_healing_toggle_changes_only_the_opt_in_native_footer_content() {
+    fn outgoing_healing_toggle_does_not_change_native_frame_while_unavailable() {
         let snapshot = EngineSnapshot {
             outgoing: DamageTotals {
                 total: 12_000.0,
@@ -3605,7 +3892,67 @@ mod tests {
         settings.show_healing = true;
         let visible = renderer.render(&snapshot, &settings);
 
-        assert!(changed_pixels_in_region(&hidden, visible, 39, 420, 319, 486) > 100);
+        assert_eq!(hidden, visible);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn target_only_native_frame_responds_to_focus_but_ignores_dense_combat_metrics() {
+        let time = NaiveDate::from_ymd_opt(2026, 7, 22)
+            .unwrap()
+            .and_hms_opt(23, 14, 40)
+            .unwrap();
+        let mut snapshot = EngineSnapshot {
+            connected: true,
+            encounter: minmaxxer_core::aggregate::LiveEncounter {
+                name: "CorusPhase2".to_owned(),
+                kind: "boss".to_owned(),
+                active: true,
+                ..minmaxxer_core::aggregate::LiveEncounter::default()
+            },
+            focus: Some(minmaxxer_core::aggregate::FocusSignal {
+                player: "Local Player".to_owned(),
+                entity: "CorusPhase2".to_owned(),
+                observed_at: time,
+                age_seconds: 2.0,
+                confidence: "likely".to_owned(),
+                evidence: "boss_network_ownership".to_owned(),
+                corroborating_hits: 0,
+                corroborated_at: None,
+                source_note: "Not authoritative hate.".to_owned(),
+            }),
+            ..EngineSnapshot::default()
+        };
+        let settings = VrOverlaySettings {
+            target_only: true,
+            show_status: false,
+            ..VrOverlaySettings::default()
+        };
+        let mut renderer = HudRenderer::new().expect("Windows includes Segoe UI");
+        let original = renderer.render(&snapshot, &settings).to_vec();
+
+        snapshot.outgoing.total = 987_654.0;
+        snapshot.outgoing.dps = 12_345.0;
+        snapshot.incoming.total = 543_210.0;
+        snapshot.timeline.push(TimelinePoint {
+            timestamp: time,
+            rolling_dps: 99_999.0,
+            ..TimelinePoint::default()
+        });
+        snapshot
+            .recent_hits
+            .push(minmaxxer_core::aggregate::RecentHit {
+                timestamp: time,
+                amount: 77_777.0,
+                damage_type: "strike".to_owned(),
+                age_seconds: 1.0,
+            });
+        let metrics_changed = renderer.render(&snapshot, &settings).to_vec();
+        assert_eq!(original, metrics_changed);
+
+        snapshot.focus.as_mut().unwrap().player = "Other Player".to_owned();
+        let focus_changed = renderer.render(&snapshot, &settings);
+        assert_ne!(metrics_changed, focus_changed);
     }
 
     #[cfg(target_os = "windows")]

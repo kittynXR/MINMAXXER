@@ -44,6 +44,7 @@
     vrStatus: null,
     timers: [],
     charts: {},
+    studioProfileDrafts: {},
     profileSaveTimer: null,
     profileSaveInFlight: false,
     profileSavePendingOptions: null,
@@ -67,11 +68,11 @@
 
   function makeMockLive() {
     const players = [
-      { name: "Aster", role: "Striker", className: "Void Dancer", dps: 48240, hps: 820, incoming: 1480, damage: 19357000, healing: 328000, crit: 38.4, active: 98.7, deaths: 0, color: COLORS[0], you: true },
-      { name: "Riven", role: "Striker", className: "Starbreaker", dps: 42980, hps: 360, incoming: 1720, damage: 17252000, healing: 144000, crit: 34.1, active: 97.9, deaths: 0, color: COLORS[1] },
-      { name: "Hexadecimal", role: "Support", className: "Lumen Sage", dps: 35810, hps: 15940, incoming: 1190, damage: 14360000, healing: 6391000, crit: 26.2, active: 96.4, deaths: 0, color: COLORS[2] },
-      { name: "Mirai", role: "Tank", className: "Gravity Warden", dps: 31220, hps: 2310, incoming: 3520, damage: 12520000, healing: 926000, crit: 23.8, active: 99.2, deaths: 0, color: COLORS[3] },
-      { name: "Comet", role: "Flex", className: "Solar Weaver", dps: 25970, hps: 2360, incoming: 550, damage: 10414000, healing: 947000, crit: 29.6, active: 91.5, deaths: 1, color: COLORS[4] }
+      { name: "Aster", role: "Striker", className: "Void Dancer", dps: 48240, incoming: 1480, damage: 19357000, healing: 0, crit: 38.4, active: 98.7, deaths: 0, color: COLORS[0], you: true },
+      { name: "Riven", role: "Striker", className: "Starbreaker", dps: 42980, incoming: 1720, damage: 17252000, healing: 0, crit: 34.1, active: 97.9, deaths: 0, color: COLORS[1] },
+      { name: "Hexadecimal", role: "Support", className: "Lumen Sage", dps: 35810, incoming: 1190, damage: 14360000, healing: 0, crit: 26.2, active: 96.4, deaths: 0, color: COLORS[2] },
+      { name: "Mirai", role: "Tank", className: "Gravity Warden", dps: 31220, incoming: 3520, damage: 12520000, healing: 0, crit: 23.8, active: 99.2, deaths: 0, color: COLORS[3] },
+      { name: "Comet", role: "Flex", className: "Solar Weaver", dps: 25970, incoming: 550, damage: 10414000, healing: 0, crit: 29.6, active: 91.5, deaths: 1, color: COLORS[4] }
     ];
     const attacks = mockAttacks();
     players.forEach((player, index) => {
@@ -83,7 +84,6 @@
     const timeline = Array.from({ length: 72 }, (_, i) => ({
       t: i * duration / 71,
       total: seededWave(i, 184200, .62, .2),
-      hps: seededWave(i, 21800, .78, 2.1),
       incoming: seededWave(i, 8460, 1.05, 4.3),
       players: players.map((player, p) => seededWave(i, player.dps, .72, p * 1.3 + .3))
     }));
@@ -104,7 +104,7 @@
       focus: { player: "Mirai", entity: "Astral Sovereign", ageSeconds: 1.2, confidence: "likely", evidence: "boss_owner_plus_local_incoming", corroboratingHits: 2, corroboratedAt: new Date().toISOString(), sourceNote: "Exact boss ownership plus immediate local incoming damage; still not an authoritative hate table." },
       outgoing: { total: 73903000, strike: 52600000, nonStrike: 21303000, hits: 1831, biggestHit: 388420, dps: 184220, rolling5s: 216300, rolling15s: 196100, rolling30s: 188700 },
       incoming: { total: 3400000, hits: 94, biggestHit: 244100, dps: 8460, avoidablePercent: 14.2, bySource: [] },
-      partyHps: 21790,
+      partyHps: 0,
       critRate: 31.6,
       debuffUptime: 94.7,
       players,
@@ -126,7 +126,7 @@
         { id: "hit-4", time: "06:41.5", age: 1.5, type: "damage", source: "Aster", action: "Void Needle", target: "Astral Sovereign", amount: 48190, flags: ["NON-STRIKE"], direction: "dealt" },
         { id: "hit-5", time: "06:40.9", age: 2.1, type: "damage", source: "Aster", action: "Umbra Cascade", target: "Astral Sovereign", amount: 241880, flags: ["STRIKE"], direction: "dealt" }
       ],
-      parserCoverage: { damage: "direct", healing: "direct", buffs: "partial", absorbs: "unavailable", positions: "unavailable" },
+      parserCoverage: { damage: "direct", healing: "unavailable", buffs: "partial", absorbs: "unavailable", positions: "unavailable" },
       capabilityNote: "Only events written by Ecliptica to the VRChat log can be measured."
     };
   }
@@ -148,13 +148,11 @@
     const rows = [
       ["06:42.8", "damage", "Aster", "Umbra Cascade", "Astral Sovereign", 388420, ["CRIT", "STRIKE"]],
       ["06:42.5", "debuff", "Astral Sovereign", "Fractured Reality", "Comet", 0, ["3.8s"]],
-      ["06:42.1", "heal", "Hexadecimal", "Lumen Chorus", "Mirai", 74260, ["CRIT"]],
       ["06:41.7", "damage", "Riven", "Nova Sever", "Astral Sovereign", 351810, ["CRIT"]],
       ["06:41.2", "buff", "Comet", "Solar Alignment", "Party", 0, ["6.2s"]],
       ["06:40.9", "damage", "Astral Sovereign", "Eclipse Pulse", "Mirai", 244100, ["INCOMING"]],
       ["06:40.4", "damage", "Hexadecimal", "Lumen Spear", "Astral Sovereign", 142220, []],
       ["06:39.9", "debuff", "Aster", "Eclipse Brand", "Astral Sovereign", 0, ["×5"]],
-      ["06:39.3", "heal", "Comet", "Photosphere", "Aster", 51940, []],
       ["06:38.8", "damage", "Mirai", "Event Horizon", "Astral Sovereign", 96740, ["STRIKE"]],
       ["06:38.1", "system", "Encounter", "Phase transition", "Eclipse", 0, ["P3"]],
       ["06:37.8", "damage", "Comet", "Solar Flare", "Astral Sovereign", 186300, ["CRIT"]],
@@ -199,7 +197,7 @@
         players: [], attacks: [], timeline: []
       };
       return {
-        id: r[0], number: r[0], encounter: r[1], stage: idx > 3 ? "Obsidian Meridian" : "Umbra Citadel · Depth 4", result: r[2], duration: r[3], dps: r[4], totalDamage: r[5], critRate: r[6], when: r[7], hps: Math.round(live.partyHps * (.9 + (idx % 4) * .035)), incomingDps: Math.round(live.incoming.dps * (.88 + (idx % 3) * .11)), debuffUptime: 88.4 + (idx % 4) * 2.1, deaths: idx % 3 === 1 ? 1 : 0, players, attacks: live.attacks, timeline: live.timeline.map((point, i) => ({ ...point, total: point.total * factor * (1 + Math.sin(i * .2 + idx) * .06) })),
+        id: r[0], number: r[0], encounter: r[1], stage: idx > 3 ? "Obsidian Meridian" : "Umbra Citadel · Depth 4", result: r[2], duration: r[3], dps: r[4], totalDamage: r[5], critRate: r[6], when: r[7], hps: 0, incomingDps: Math.round(live.incoming.dps * (.88 + (idx % 3) * .11)), debuffUptime: 88.4 + (idx % 4) * 2.1, deaths: idx % 3 === 1 ? 1 : 0, players, attacks: live.attacks, timeline: live.timeline.map((point, i) => ({ ...point, total: point.total * factor * (1 + Math.sin(i * .2 + idx) * .06) })),
         metricsScope: "boss", observedDuration: r[3] + preBossDuration, preBossDuration, preBossOutgoing: preBossEncounter.outgoing, preBossIncoming: preBossEncounter.incoming, bossCount: 1, encounters: [preBossEncounter, bossEncounter],
         outgoing: bossEncounter.outgoing, incoming: bossEncounter.incoming, hits: bossEncounter.hits, biggestHit: bossEncounter.biggestHit
       };
@@ -825,22 +823,18 @@
       .filter((event) => {
         const rawType = String(event.rawType ?? event.kind ?? event.type ?? "").toLowerCase();
         return rawType.includes("damage_taken")
-          || rawType.includes("healing")
           || event.direction === "taken"
-          || event.flags?.includes("INCOMING")
-          || event.type === "heal";
+          || event.flags?.includes("INCOMING");
       })
       .slice()
       .sort((left, right) => eventAgeSeconds(left, live) - eventAgeSeconds(right, live))
       .slice(0, limit)
       .map((event) => {
-        const rawType = String(event.rawType ?? event.kind ?? event.type ?? "").toLowerCase();
-        const healing = rawType.includes("heal") || event.type === "heal";
         return {
           ...event,
-          healing,
+          healing: false,
           age: eventAgeSeconds(event, live),
-          label: healing ? readableEntityName(event.action || event.source, "Healing") : readableIncomingSource(event.source)
+          label: readableIncomingSource(event.source)
         };
       });
   }
@@ -901,15 +895,14 @@
     text("#partyDps", formatCompact(live.outgoing.dps));
     if (state.usingMock) {
       $("#partyDpsDetail").innerHTML = `<b id="partyDpsDelta">▲ 8.3%</b> demo comparison`;
-      $("#healingDetail").innerHTML = `<b>96.1%</b> demo effective healing`;
       $("#damageInDetail").innerHTML = `<b id="avoidableDamage">14.2%</b> demo avoidable`;
       $("#critDetail").innerHTML = `<b>${formatCompact(live.outgoing.strike,2)}</b> demo strike · ${formatCompact(live.outgoing.nonStrike,2)} non-strike`;
       $("#debuffDetail").innerHTML = `<b>2.8s</b> demo longest gap`;
     } else $("#partyDpsDetail").innerHTML = `${scope.excluded ? "<b>Excluded</b> from archived boss metrics · " : ""}${live.outgoing.hits ? `<b>${formatNumber(live.outgoing.hits)}</b> outgoing hits logged` : `<b>0</b> outgoing hits logged`}`;
-    text("#partyHps", state.usingMock ? formatCompact(live.partyHps) : "N/A");
+    text("#partyHps", "N/A");
+    $("#healingDetail").innerHTML = `<b>Not logged</b> outgoing healing and HP gain unavailable`;
     text("#damageIn", formatCompact(live.incoming.dps));
     if (!state.usingMock) {
-      $("#healingDetail").innerHTML = `<b>Not logged</b> unavailable in audited Ecliptica output`;
       $("#damageInDetail").innerHTML = `<b>${formatNumber(live.incoming.hits)}</b> incoming hits · avoidability not logged`;
       $("#critDetail").innerHTML = `<b>${formatCompact(live.outgoing.strike, 2)}</b> strike · ${formatCompact(live.outgoing.nonStrike, 2)} non-strike`;
       $("#debuffDetail").innerHTML = `<b>Not logged</b> effect uptime unavailable`;
@@ -919,7 +912,7 @@
     text("#critRate", live.outgoing.total ? formatPercent(strikeShare) : "N/A");
     text("#debuffUptime", live.debuffAvailable === false ? "N/A" : formatPercent(live.debuffUptime));
     renderSpark("#dpsSpark", live.timeline.map((p) => p.total));
-    renderSpark("#hpsSpark", state.usingMock ? live.timeline.map((p) => p.hps) : []);
+    renderSpark("#hpsSpark", []);
     renderSpark("#inSpark", live.timeline.map((p) => p.incoming));
     renderSpark("#critSpark", state.usingMock ? live.timeline.map((_, i) => seededWave(i, strikeShare, .3, 1.7)) : []);
     renderSpark("#debuffSpark", state.usingMock ? live.timeline.map((_, i) => seededWave(i, live.debuffUptime, .09, 3)) : []);
@@ -942,7 +935,6 @@
 
   function partyMetricValue(player, metric) {
     if (metric === "damage") return player.damage;
-    if (metric === "healing") return player.healing;
     if (metric === "incoming") return player.incomingDps || (state.live.encounter.duration ? player.incoming / state.live.encounter.duration : 0);
     return player.dps;
   }
@@ -953,9 +945,7 @@
     $("#partyTableBody").innerHTML = players.length ? players.map((player, index) => {
       const value = partyMetricValue(player, state.partyMetric);
       const roleKey = player.role.toLowerCase();
-      const healingNote = player.healing > 0 ? "Outgoing healing logged to other players" : "No outgoing healing to another player has been logged";
-      const healingValue = player.healing > 0 ? formatCompact(player.healing, 2) : "—";
-      return `<tr><td class="rank-cell">${String(index + 1).padStart(2, "0")}</td><td><div class="player-cell"><span class="player-avatar" style="--player-color:${player.color}">${escapeHtml(initials(player.name))}</span>${escapeHtml(player.name)}${player.you ? '<span class="you-pill">YOU</span>' : ""}</div></td><td><span class="role-pill" style="--role-color:${ROLE_COLORS[roleKey] || ROLE_COLORS.unknown}">${escapeHtml(player.role)}</span></td><td class="numeric ${index === 0 ? "positive" : ""}">${formatCompact(player.dps)}</td><td class="numeric">${formatCompact(player.damage, 2)}</td><td class="numeric positive" title="${healingNote}">${healingValue}</td><td class="numeric">${player.damage ? formatPercent(player.strike / player.damage * 100) : "N/A"}</td><td class="numeric">${formatPercent(player.active)}</td><td class="share-cell"><div class="share-track" style="--player-color:${player.color}"><i style="width:${value / total * 100}%"></i></div><small>${formatPercent(value / total * 100)}</small></td></tr>`;
+      return `<tr><td class="rank-cell">${String(index + 1).padStart(2, "0")}</td><td><div class="player-cell"><span class="player-avatar" style="--player-color:${player.color}">${escapeHtml(initials(player.name))}</span>${escapeHtml(player.name)}${player.you ? '<span class="you-pill">YOU</span>' : ""}</div></td><td><span class="role-pill" style="--role-color:${ROLE_COLORS[roleKey] || ROLE_COLORS.unknown}">${escapeHtml(player.role)}</span></td><td class="numeric ${index === 0 ? "positive" : ""}">${formatCompact(player.dps)}</td><td class="numeric">${formatCompact(player.damage, 2)}</td><td class="numeric unavailable-data" title="Outgoing healing is not present in the audited game log">N/A</td><td class="numeric">${player.damage ? formatPercent(player.strike / player.damage * 100) : "N/A"}</td><td class="numeric">${formatPercent(player.active)}</td><td class="share-cell"><div class="share-track" style="--player-color:${player.color}"><i style="width:${value / total * 100}%"></i></div><small>${formatPercent(value / total * 100)}</small></td></tr>`;
     }).join("") : `<tr><td colspan="9"><div class="empty-state"><div><strong>Waiting for player data</strong><p>The local player row appears when Ecliptica writes attributable combat events.</p></div></div></td></tr>`;
   }
 
@@ -1182,7 +1172,7 @@
     ];
     $("#compareSummary").innerHTML = metrics.map(([label, av, bv, inverse, formatter, neutral]) => { const d = delta(av, bv, inverse); const direction = d.value >= 0 ? "Higher" : "Lower"; return `<div class="delta-card" style="--delta-color:${neutral ? "var(--cyan)" : d.good ? "var(--mint)" : "var(--rose)"}"><span>${label}</span><strong>${d.value >= 0 ? "+" : "−"}${formatter(d.value)}</strong><small>${neutral ? `${direction} in comparison` : `${d.good ? "Improved" : "Regressed"} in comparison`}</small></div>`; }).join("");
     $("#compareLegend").innerHTML = `<span><i style="--legend:#54e6ff"></i>#${escapeHtml(a.number)} ${escapeHtml(a.encounter)}</span><span><i style="--legend:#ad8cff"></i>#${escapeHtml(b.number)} ${escapeHtml(b.encounter)}</span>`;
-    const extraMetrics = state.usingMock ? [["Critical rate", a.critRate, b.critRate, false, (v) => `${Math.abs(v).toFixed(1)} pt`, mixedNeutral], ["Demo HPS", a.hps, b.hps, false, (v) => formatCompact(Math.abs(v)), mixedNeutral]] : [[`${prefix} outgoing hits`, a.hits, b.hits, false, (v) => formatNumber(Math.abs(v)), true], [`Largest ${prefix.toLowerCase()} hit`, a.biggestHit, b.biggestHit, false, (v) => formatCompact(Math.abs(v)), true]];
+    const extraMetrics = state.usingMock ? [["Critical rate", a.critRate, b.critRate, false, (v) => `${Math.abs(v).toFixed(1)} pt`, mixedNeutral], ["Incoming DPS", a.incomingDps, b.incomingDps, true, (v) => formatCompact(Math.abs(v)), mixedNeutral]] : [[`${prefix} outgoing hits`, a.hits, b.hits, false, (v) => formatNumber(Math.abs(v)), true], [`Largest ${prefix.toLowerCase()} hit`, a.biggestHit, b.biggestHit, false, (v) => formatCompact(Math.abs(v)), true]];
     $("#compareTable").innerHTML = metrics.concat(extraMetrics).map(([label, av, bv, inverse, formatter, neutral]) => { const d = delta(av, bv, inverse); const lower = label.toLowerCase(); return `<div class="metric-delta-row"><span>${label}</span><b>${lower.includes("time") || lower.includes("duration") ? formatDuration(bv, true) : lower.includes("rate") || lower.includes("uptime") ? formatPercent(bv) : formatCompact(bv)}</b><em class="${neutral ? "" : d.good ? "positive" : "negative"}">${d.value >= 0 ? "+" : "−"}${formatter(d.value)}</em></div>`; }).join("");
     const names = [...new Set([...a.players, ...b.players].map((p) => p.name))];
     $("#playerDeltaBody").innerHTML = names.map((name) => { const pa = a.players.find((p) => p.name === name); const pb = b.players.find((p) => p.name === name); const av = pa?.dps || 0, bv = pb?.dps || 0, change = bv - av; return `<tr><td><div class="player-cell"><span class="player-avatar" style="--player-color:${pb?.color || pa?.color || COLORS[0]}">${escapeHtml(initials(name))}</span>${escapeHtml(name)}</div></td><td class="numeric">${formatCompact(av)}</td><td class="numeric">${formatCompact(bv)}</td><td class="numeric ${mixedNeutral ? "" : change >= 0 ? "positive" : "negative"}">${change >= 0 ? "+" : "−"}${formatCompact(Math.abs(change))}</td><td><div class="impact-track"><i style="--impact:${Math.min(48,Math.abs(change)/400)}%;--offset:${change < 0 ? "-" : ""}${Math.min(48,Math.abs(change)/400)}%;--impact-color:${mixedNeutral ? "var(--cyan)" : change >= 0 ? "var(--mint)" : "var(--rose)"}"></i></div></td></tr>`; }).join("");
@@ -1357,8 +1347,11 @@
   function overlayOptionsFromSearch(search = location.search) {
     const params = new URLSearchParams(search); const hasShow = params.has("show"); const showRaw = params.get("show") ?? "";
     const hitMode = ["hits", "recent_hits"].includes(params.get("mode"));
-    const supported = ["dps", "damage", "healing", "incoming", "encounter", "phase", "boss", "hits", "focus", "graph", "survival", "telemetry", "loadout"];
-    const parsedShow = hasShow ? showRaw.split(",").map((item) => item === "recent_hits" ? "hits" : item).filter((item) => supported.includes(item)) : hitMode ? ["hits", "focus", "phase", "boss", "survival"] : ["dps", "damage", "incoming", "encounter", "phase", "boss", "hits", "focus", "graph", "survival"];
+    const requestedProfile = params.get("profile");
+    const profile = ["broadcast", "minimal", "vr", "target"].includes(requestedProfile) ? requestedProfile : hitMode ? "broadcast" : "target";
+    const supported = ["dps", "damage", "incoming", "encounter", "phase", "boss", "hits", "focus", "graph", "survival", "telemetry", "loadout"];
+    const defaultShow = profile === "target" ? ["focus"] : ["dps", "damage", "incoming", "encounter", "phase", "boss", "hits", "focus", "graph", "survival"];
+    const parsedShow = hasShow ? showRaw.split(",").map((item) => item === "recent_hits" ? "hits" : item).filter((item) => supported.includes(item)) : hitMode ? ["hits", "focus", "phase", "boss", "survival"] : defaultShow;
     if (hasShow && params.get("ui") !== String(OVERLAY_SETTINGS_VERSION)) {
       const telemetryIndex = parsedShow.indexOf("telemetry");
       if (telemetryIndex >= 0) parsedShow.splice(telemetryIndex, 1);
@@ -1372,19 +1365,18 @@
     const requestedLayout = params.get("layout") || (hitMode ? "portrait" : "landscape");
     return {
       surface: params.get("surface") === "desktop" ? "desktop" : "browser",
-      profile: ["broadcast", "minimal", "vr"].includes(params.get("profile")) ? params.get("profile") : "broadcast",
+      profile,
       layout: streamLayout(requestedLayout),
       theme: ["void", "glass"].includes(params.get("theme")) ? params.get("theme") : "void",
-      accent: ACCENTS[params.get("accent")] ? params.get("accent") : "cyan",
-      rows: clamp(Math.round(number(params.get("rows") ?? 5, 5)), 1, 8),
-      hitRows: clamp(Math.round(number(params.get("hit_rows") ?? params.get("hitRows") ?? 5, 5)), 1, 8), show: parsedShow,
+      accent: ACCENTS[params.get("accent")] ? params.get("accent") : profile === "target" ? "amber" : "cyan",
+      rows: clamp(Math.round(number(params.get("rows") ?? (profile === "target" ? 1 : 5), profile === "target" ? 1 : 5)), 1, 8),
+      hitRows: clamp(Math.round(number(params.get("hit_rows") ?? params.get("hitRows") ?? (profile === "target" ? 1 : 5), profile === "target" ? 1 : 5)), 1, 8), show: parsedShow,
       bg: clamp(number(params.get("bg") ?? 94, 94), 0, 100), scale: clamp(number(params.get("scale") ?? 100, 100), 70, 160), statusCards: true
     };
   }
 
   function metricValue(player, metric, duration) {
     if (metric === "damage") return player.damage;
-    if (metric === "healing") return player.healing;
     if (metric === "incoming") return player.incomingDps || player.incoming / Math.max(duration, 1);
     return player.dps;
   }
@@ -1392,19 +1384,59 @@
   function overlayMetricLabel(metric, scope) {
     if (metric === "dps") return `${scope.metric} DPS`;
     if (metric === "damage") return `${scope.metric} DAMAGE`;
-    if (metric === "healing") return "OUTGOING HEALING TO OTHERS";
     return "DAMAGE TAKEN";
   }
 
   function overlayMetricTotal(live, metric) {
     if (metric === "dps") return live.outgoing.dps;
     if (metric === "damage") return live.outgoing.total;
-    if (metric === "healing") return live.players.reduce((sum, player) => sum + number(player.healing), 0);
     return live.incoming.total;
+  }
+
+  function targetHandoffState(root, live) {
+    const scope = liveCombatScope(live);
+    const current = scope.key === "boss" ? String(live?.focus?.player || "").trim() : "";
+    const encounterKey = scope.key === "boss" ? [
+      live?.sessionId || "",
+      live?.stage || "",
+      live?.encounter?.name || ""
+    ].join("|") : "";
+    const previousEncounter = root.dataset.targetEncounter || "";
+    const previousPlayer = root.dataset.targetPlayer || "";
+    const sameEncounter = Boolean(encounterKey && previousEncounter === encounterKey);
+    const changedEdge = Boolean(sameEncounter && previousPlayer && current && previousPlayer.localeCompare(current, undefined, { sensitivity: "base" }) !== 0);
+    const animateUntil = changedEdge ? Date.now() + 900 : sameEncounter ? number(root.dataset.targetAnimateUntil) : 0;
+    root.dataset.targetEncounter = encounterKey;
+    root.dataset.targetPlayer = current || (sameEncounter ? previousPlayer : "");
+    root.dataset.targetAnimateUntil = String(animateUntil);
+    return { changed: animateUntil > Date.now(), current };
+  }
+
+  function renderTargetOnlyOverlay(root, live, options, accent, status = null) {
+    const scope = liveCombatScope(live);
+    const focusState = focusPresentation(live);
+    if (status) {
+      root.dataset.targetEncounter = "";
+      root.dataset.targetPlayer = "";
+      root.dataset.targetAnimateUntil = "0";
+    }
+    const handoff = status ? { changed: false, current: "" } : targetHandoffState(root, live);
+    const hasTarget = Boolean(handoff.current && scope.key === "boss" && !status);
+    const isLocal = hasTarget && handoff.current.localeCompare(String(live.observedPlayer || ""), undefined, { sensitivity: "base" }) === 0;
+    const targetName = status ? status.title : focusState.player;
+    const stateLabel = status ? (status.tone === "lost" ? "OFFLINE" : status.tone === "connecting" ? "CONNECTING" : "WAITING") : isLocal ? "YOU ARE TARGETED" : focusState.badge;
+    const context = status ? status.detail : scope.key === "boss" ? `${readableEntityName(live.encounter.name)} · ${focusState.detail}` : focusState.detail;
+    const classes = [
+      "combat-overlay", "target-only-overlay", `surface-${options.surface}`, "profile-target", `theme-${options.theme}`,
+      handoff.changed ? "target-handoff" : "", hasTarget ? "has-target" : "target-idle", isLocal ? "is-local-target" : ""
+    ].filter(Boolean).join(" ");
+    const targetDataState = hasTarget ? (focusState.confidence === "stale" ? "stale" : "active") : "idle";
+    root.innerHTML = `<section class="${classes}" data-target-state="${targetDataState}" data-target-local="${isLocal}" style="--overlay-accent:${accent[0]};--overlay-accent-rgb:${accent[1]};--overlay-opacity:${options.bg/100};--overlay-scale:${options.scale/100}" aria-label="Current boss target" aria-live="polite"><div class="target-pulse" aria-hidden="true"><i></i><b></b></div><div class="target-copy"><span class="target-state">${escapeHtml(stateLabel)}</span><strong class="target-name">${escapeHtml(targetName)}</strong><small class="target-context">${escapeHtml(context)}</small></div></section>`;
   }
 
   function renderCombatOverlay(root, live, options) {
     if (!root || !live) return;
+    options.surface = options.surface === "desktop" ? "desktop" : "browser";
     options.layout = streamLayout(options.layout);
     const accent = ACCENTS[options.accent] || ACCENTS.cyan;
     const status = options.statusCards && state.overlayServiceState === "connecting"
@@ -1414,12 +1446,16 @@
         : options.statusCards && (!live.connected || !live.inWorld)
           ? { tone: "ready", eyebrow: "MINMAXXER READY", title: "NO LIVE ECLIPTICA INSTANCE", detail: "Join Ecliptica in VRChat. This overlay will update automatically.", badge: "WAITING FOR VRCHAT" }
           : null;
+    if (options.profile === "target") {
+      renderTargetOnlyOverlay(root, live, options, accent, status);
+      return;
+    }
     if (status) {
       root.innerHTML = `<section class="combat-overlay surface-${options.surface} overlay-status-card status-${status.tone} profile-${options.profile} layout-${options.layout} theme-${options.theme}" style="--overlay-accent:${accent[0]};--overlay-accent-rgb:${accent[1]};--overlay-opacity:${options.bg/100};--overlay-scale:${options.scale/100}" aria-label="MINMAXXER overlay status"><header class="overlay-head"><div class="overlay-wordmark">MINMAXXER</div><div class="overlay-status-badge"><i></i>${escapeHtml(status.badge)}</div></header><div class="overlay-status-body"><span>${escapeHtml(status.eyebrow)}</span><strong>${escapeHtml(status.title)}</strong><p>${escapeHtml(status.detail)}</p></div><footer class="overlay-foot"><strong>MINMAXXER</strong><span>127.0.0.1 // PRIVATE HUD</span></footer></section>`;
       return;
     }
     const displayDuration = live.encounter.duration + (live.encounter.active && !state.usingMock && state.lastLiveAt ? Math.max(0, (Date.now() - state.lastLiveAt) / 1000) : 0);
-    const metrics = ["dps", "damage", "healing", "incoming"].filter((metric) => options.show.includes(metric));
+    const metrics = ["dps", "damage", "incoming"].filter((metric) => options.show.includes(metric));
     const scope = liveCombatScope(live);
     const hits = recentHits(live, Math.min(5, options.hitRows || 5));
     const hitsInactive = hitFeedIsInactive(hits);
@@ -1438,12 +1474,13 @@
     }
     const runContextWidget = runChips.length ? `<div class="overlay-run-context">${runChips.join("")}</div>` : "";
     const focusState = focusPresentation(live);
-    const focus = options.show.includes("focus") ? `<div class="overlay-focus confidence-${escapeHtml(focusState.confidence)} ${live.focus && scope.key === "boss" ? "" : "idle"}" title="${escapeHtml(focusState.note)}"><span>BOSS TARGET?</span><strong>${escapeHtml(focusState.player)}</strong><em>${escapeHtml(focusState.detail)}</em><i>${escapeHtml(focusState.badge)} · PROXY</i></div>` : "";
+    const targetState = targetHandoffState(root, live);
+    const focus = options.show.includes("focus") ? `<div class="overlay-focus confidence-${escapeHtml(focusState.confidence)} ${live.focus && scope.key === "boss" ? "" : "idle"} ${targetState.changed ? "target-handoff" : ""}" title="${escapeHtml(focusState.note)}"><span>BOSS TARGET?</span><strong>${escapeHtml(focusState.player)}</strong><em>${escapeHtml(focusState.detail)}</em><i>${escapeHtml(focusState.badge)} · PROXY</i></div>` : "";
     const loadoutItems = live.loadout?.items || [];
     const loadout = options.show.includes("loadout") ? `<section class="overlay-loadout${live.loadout?.available ? "" : " unavailable"}" title="${escapeHtml(live.loadout?.sourceNote || "Loadout telemetry is unavailable.")}"><header><span>LOCAL LOADOUT</span><small>${live.loadout?.available ? `${loadoutItems.length} OBSERVED` : "NOT EXPOSED BY LOG"}</small></header>${live.loadout?.available ? `<div>${loadoutItems.length ? loadoutItems.slice(0,8).map((item)=>`<span><b>${escapeHtml(item.name)}</b><i>×${formatNumber(item.stacks)}</i></span>`).join("") : `<em>Observed empty loadout</em>`}</div>` : `<div><em>Ecliptica did not log shop item names or stacks.</em></div>`}</section>` : "";
     const hitWidget = options.show.includes("hits") ? `<section class="overlay-feed overlay-hit-widget ${hitsInactive ? "inactive" : ""}" aria-label="Last five local outgoing damage events"><header><div><span>LAST 5 LOCAL DAMAGE EVENTS</span><small>${hitsInactive ? `IDLE · LAST HIT ${formatHitAge(hits[0].age)} · RETAINED FOR PHASE` : "THE LOG EXPOSES DAMAGE CATEGORY, NOT ABILITY NAME"}</small></div></header>${hits.length ? hits.map((hit,index)=>{const rawAction=String(hit.action||"").toLowerCase().replaceAll("-"," ");const hasAbilityName=state.usingMock&&!["strike","non strike","outgoing hit"].includes(rawAction);return `<div class="overlay-feed-row overlay-hit-row ${index===0&&hitChanged?"newest":""}"><span class="hit-age">${formatHitAge(hit.age)}</span><span class="feed-name"><strong>${escapeHtml(hasAbilityName?hit.action:"LOCAL DAMAGE EVENT")}</strong><small>DAMAGE TYPE</small></span><span class="hit-type ${hit.strike?"strike":"non-strike"}">${hit.strike?"STRIKE":"NON-STRIKE"}</span><strong class="feed-amount">${formatNumber(hit.amount)}${hit.flags.includes("CRIT")?" ✦":""}</strong></div>`}).join("") : `<div class="overlay-hit-empty">Waiting for local outgoing damage…</div>`}</section>` : "";
-    const survivalWidget = options.show.includes("survival") ? `<section class="overlay-feed overlay-survival-widget" aria-label="Damage taken and healing received"><header><div><span>SURVIVAL FEED</span><small>INCOMING DAMAGE · HEALING IF EVER LOGGED</small></div><strong>${formatCompact(live.incoming.total)} <em>TAKEN</em></strong></header>${survival.length ? survival.map((event)=>`<div class="overlay-feed-row ${event.healing?"healing":"damage-taken"}"><span class="hit-age">${formatHitAge(event.age)}</span><span class="feed-name"><strong>${escapeHtml(event.label)}</strong><small>${event.healing?"HEAL RECEIVED":"DAMAGE TAKEN"}</small></span><span class="feed-vital">${event.healing?"HEAL":"HIT"}</span><strong class="feed-amount">${event.healing?"+":"−"}${formatNumber(event.amount)}</strong></div>`).join("") : `<div class="overlay-hit-empty">No recent incoming damage. Healing is not exposed by this build.</div>`}</section>` : "";
-    const totalsWidget = metrics.length ? `<div class="overlay-totals">${metrics.map((metric,i)=>{const label=overlayMetricLabel(metric,scope);const value=overlayMetricTotal(live,metric);const missingHealing=metric==="healing"&&value===0;const title=missingHealing?' title="No outgoing healing to another player has been logged"':"";return `<div class="overlay-total metric-${metric} ${i===0?"accent":""}"${title}><span>${escapeHtml(label)}${scope.excluded&&metric!=="incoming"?" · EXCLUDED":""}</span><strong>${missingHealing?"—":formatCompact(value)}</strong></div>`}).join("")}</div>` : "";
+    const survivalWidget = options.show.includes("survival") ? `<section class="overlay-feed overlay-survival-widget" aria-label="Damage taken"><header><div><span>SURVIVAL FEED</span><small>INCOMING DAMAGE · HP GAIN IS NOT LOGGED</small></div><strong>${formatCompact(live.incoming.total)} <em>TAKEN</em></strong></header>${survival.length ? survival.map((event)=>`<div class="overlay-feed-row damage-taken"><span class="hit-age">${formatHitAge(event.age)}</span><span class="feed-name"><strong>${escapeHtml(event.label)}</strong><small>DAMAGE TAKEN</small></span><span class="feed-vital">HIT</span><strong class="feed-amount">−${formatNumber(event.amount)}</strong></div>`).join("") : `<div class="overlay-hit-empty">No recent incoming damage. HP gain and healing are not logged.</div>`}</section>` : "";
+    const totalsWidget = metrics.length ? `<div class="overlay-totals">${metrics.map((metric,i)=>{const label=overlayMetricLabel(metric,scope);const value=overlayMetricTotal(live,metric);return `<div class="overlay-total metric-${metric} ${i===0?"accent":""}"><span>${escapeHtml(label)}${scope.excluded&&metric!=="incoming"?" · EXCLUDED":""}</span><strong>${formatCompact(value)}</strong></div>`}).join("")}</div>` : "";
     const telemetry = options.show.includes("telemetry") ? `<div class="overlay-telemetry" title="Neither complete audited Ecliptica log contains HP, healing, gem, purchase, or soundtrack records."><span><b>HP REMAINING</b><strong>NOT LOGGED</strong></span><span><b>HEALING RECEIVED</b><strong>NOT LOGGED</strong></span><span><b>GEMS / SHOP</b><strong>NOT LOGGED</strong></span><span><b>CURRENT SONG</b><strong>NOT LOGGED</strong></span></div>` : "";
     const graph = options.show.includes("graph") ? dpsGraphMarkup(live, scope) : "";
     root.innerHTML = `<section class="combat-overlay surface-${options.surface} profile-${options.profile} layout-${options.layout} theme-${options.theme}" style="--overlay-accent:${accent[0]};--overlay-accent-rgb:${accent[1]};--overlay-opacity:${options.bg/100};--overlay-scale:${options.scale/100}" aria-label="Live Ecliptica combat overlay"><header class="overlay-head"><div class="overlay-wordmark">MINMAXXER</div><div class="overlay-title"><strong>${escapeHtml(bossName)}</strong><span>${escapeHtml(stageName)} · ${escapeHtml(scope.label)}</span></div><div class="overlay-timer"><strong>${formatDuration(displayDuration,true)}</strong><span>${live.encounter.active?"● LIVE SEGMENT":"WAITING"}</span></div></header>${focus}${runContextWidget}<main class="overlay-stream-body"><div class="overlay-performance">${graph}${totalsWidget}${telemetry}${loadout}</div><div class="overlay-feeds">${hitWidget}${survivalWidget}</div></main><footer class="overlay-foot"><strong>MINMAXXER</strong><span>${state.usingMock?"DEMO DATA":live.connected?"VRCHAT LOG CONNECTED":"WAITING FOR LOG"} · ${escapeHtml(scope.label)}</span></footer></section>`;
@@ -1452,10 +1489,11 @@
   function hexToRgb(hex) { const value = String(hex).replace("#", ""); const parsed = parseInt(value.length === 3 ? value.split("").map((c) => c + c).join("") : value, 16); return `${(parsed >> 16) & 255},${(parsed >> 8) & 255},${parsed & 255}`; }
 
   function readStudioOptions() {
+    const profile = $(".profile-card.active")?.dataset.profile || "target";
     return {
-      profile: $(".profile-card.active")?.dataset.profile || "broadcast", layout: streamLayout($("#overlayLayout")?.value || "landscape"), theme: $("#overlayTheme")?.value || "void",
-      accent: $("#accentOptions button.active")?.dataset.accent || "cyan", rows: number($("#overlayRows")?.value, 5), hitRows: number($("#overlayHitRows")?.value, 5), scale: number($("#overlayScale")?.value, 100), bg: number($("#overlayBg")?.value, 94),
-      show: $$(".show-options input:checked:not(:disabled)").map((input) => input.value)
+      profile, layout: streamLayout($("#overlayLayout")?.value || "landscape"), theme: $("#overlayTheme")?.value || "void",
+      accent: $("#accentOptions button.active")?.dataset.accent || "amber", rows: number($("#overlayRows")?.value, 1), hitRows: number($("#overlayHitRows")?.value, 1), scale: number($("#overlayScale")?.value, 100), bg: number($("#overlayBg")?.value, 94),
+      show: profile === "target" ? ["focus"] : $$(".show-options input:checked:not(:disabled)").map((input) => input.value)
     };
   }
 
@@ -1523,14 +1561,16 @@
 
   function renderStudioPreview(persist = false) {
     if (!$("#studioOverlayPreview") || !state.live) return; const options = readStudioOptions(); state.overlay = options;
+    state.studioProfileDrafts[options.profile] = { ...options, show: [...options.show] };
     if (persist) state.studioBackendPending = true;
     text("#overlayRowsValue", options.rows); text("#overlayHitRowsValue", options.hitRows); text("#overlayScaleValue", `${options.scale}%`); text("#overlayBgValue", `${options.bg}%`);
-    const portrait = options.layout === "portrait";
+    const targetOnly = options.profile === "target";
+    const portrait = !targetOnly && options.layout === "portrait";
     const preview = $("#studioOverlayPreview");
-    const fitScale = portrait ? .4 : .46;
-    $("#overlayStage").dataset.orientation = options.layout;
-    $(".stage-size", $("#overlayStage")).textContent = portrait ? "720 × 1280" : "1280 × 720";
-    text("#obsResolutionHint", `${portrait ? "Portrait · set the Browser Source to 720 × 1280" : "Landscape · set the Browser Source to 1280 × 720"}`);
+    const fitScale = targetOnly ? .92 : portrait ? .4 : .46;
+    $("#overlayStage").dataset.orientation = targetOnly ? "target" : options.layout;
+    $(".stage-size", $("#overlayStage")).textContent = targetOnly ? "720 × 180" : portrait ? "720 × 1280" : "1280 × 720";
+    text("#obsResolutionHint", targetOnly ? "Target-only · set the Browser Source to 720 × 180" : portrait ? "Portrait · set the Browser Source to 720 × 1280" : "Landscape · set the Browser Source to 1280 × 720");
     const oneToOne = $("#previewOneToOne").classList.contains("active");
     $("#overlayStage").classList.toggle("one-to-one", oneToOne);
     preview.style.transform = oneToOne ? "scale(1)" : `scale(${fitScale})`;
@@ -1540,32 +1580,56 @@
     if (persist) queueOverlayProfileSave(options);
   }
 
-  function studioOptionsFromSettings() {
+  function studioOptionsFromSettings(requestedProfile = null) {
     const desktop = state.settings?.desktop_overlay ?? state.settings?.desktopOverlay ?? {};
     const profiles = state.settings?.overlay_profiles ?? state.settings?.overlayProfiles;
     if (!Array.isArray(profiles) || !profiles.length) return null;
-    const requested = String(desktop.profile || "broadcast");
-    const profile = profiles.find((item) => String(item.id) === requested) || profiles[0];
+    const requested = String(requestedProfile || desktop.profile || "target");
+    const profile = profiles.find((item) => String(item.id) === requested);
+    if (!profile && requestedProfile) return null;
+    const resolved = profile || profiles[0];
     const show = [];
-    if (profile.show_dps) show.push("dps");
-    if (profile.show_damage) show.push("damage");
-    if (profile.show_healing) show.push("healing");
-    if (profile.show_incoming) show.push("incoming");
-    if (profile.show_encounter) show.push("encounter");
-    if (profile.show_phase) show.push("phase");
-    if (profile.show_boss_number) show.push("boss");
-    if (profile.show_hits || profile.show_recent_hits) show.push("hits");
-    if (profile.show_focus) show.push("focus");
-    if (profile.show_graph ?? true) show.push("graph");
-    if (profile.show_survival ?? true) show.push("survival");
-    if (profile.show_telemetry ?? false) show.push("telemetry");
-    if (profile.show_loadout) show.push("loadout");
+    if (resolved.show_dps) show.push("dps");
+    if (resolved.show_damage) show.push("damage");
+    if (resolved.show_incoming) show.push("incoming");
+    if (resolved.show_encounter) show.push("encounter");
+    if (resolved.show_phase) show.push("phase");
+    if (resolved.show_boss_number) show.push("boss");
+    if (resolved.show_hits || resolved.show_recent_hits) show.push("hits");
+    if (resolved.show_focus) show.push("focus");
+    if (resolved.show_graph ?? true) show.push("graph");
+    if (resolved.show_survival ?? true) show.push("survival");
+    if (resolved.show_telemetry ?? false) show.push("telemetry");
+    if (resolved.show_loadout) show.push("loadout");
     return {
-      profile: String(profile.id || requested), layout: streamLayout(profile.layout || "landscape"), theme: String(profile.theme || "void"), accent: profile.accent === "#8ff0cf" ? "mint" : String(profile.accent || "cyan"),
-      rows: number(profile.rows, 5), hitRows: number(profile.recent_hit_rows ?? profile.recentHitRows, 5), scale: number(profile.scale, 1) * 100,
-      bg: number(desktop.opacity, .94) * 100, show,
+      profile: String(resolved.id || requested), layout: streamLayout(resolved.layout || "landscape"), theme: String(resolved.theme || "void"), accent: resolved.accent === "#8ff0cf" ? "mint" : String(resolved.accent || "cyan"),
+      rows: number(resolved.rows, 5), hitRows: number(resolved.recent_hit_rows ?? resolved.recentHitRows, 5), scale: number(resolved.scale, 1) * 100,
+      bg: number(desktop.opacity, .94) * 100, show: String(resolved.id) === "target" ? ["focus"] : show,
       schemaVersion: number(state.settings?.overlay_schema_version ?? state.settings?.overlaySchemaVersion, OVERLAY_SETTINGS_VERSION)
     };
+  }
+
+  function applyStudioControls(saved) {
+    if (!saved) return null;
+    const profileId = ["broadcast", "minimal", "vr", "target"].includes(saved.profile) ? saved.profile : "target";
+    $$(".profile-card").forEach((button) => button.classList.toggle("active", button.dataset.profile === profileId));
+    if (saved.layout) $("#overlayLayout").value = streamLayout(saved.layout);
+    if (saved.theme) $("#overlayTheme").value = ["void", "glass"].includes(saved.theme) ? saved.theme : "void";
+    if (saved.rows) $("#overlayRows").value = saved.rows;
+    if (saved.hitRows) $("#overlayHitRows").value = saved.hitRows;
+    if (saved.scale) $("#overlayScale").value = saved.scale;
+    if (saved.bg !== undefined) $("#overlayBg").value = saved.bg;
+    $$("#accentOptions button").forEach((button) => button.classList.toggle("active", button.dataset.accent === saved.accent));
+    if (Array.isArray(saved.show)) {
+      const restoredShow = new Set(profileId === "target" ? ["focus"] : saved.show);
+      if (number(saved.schemaVersion, 1) < OVERLAY_SETTINGS_VERSION && restoredShow.has("encounter")) {
+        restoredShow.add("phase"); restoredShow.add("boss"); restoredShow.add("graph"); restoredShow.add("survival");
+      }
+      if (number(saved.schemaVersion, 1) < 4) restoredShow.delete("telemetry");
+      restoredShow.delete("healing");
+      $$(".show-options input").forEach((input) => { input.checked = !input.disabled && restoredShow.has(input.value); });
+    }
+    return profileId;
   }
 
   function applySavedStudioOptions() {
@@ -1575,25 +1639,32 @@
     const retryLocal = Boolean(local?.backendPending);
     let saved = migrateLocal || retryLocal ? local : studioOptionsFromSettings() || local;
     if (!saved) return;
-    $$(".profile-card").forEach((button) => button.classList.toggle("active", button.dataset.profile === saved.profile));
-    if (saved.layout) $("#overlayLayout").value = streamLayout(saved.layout);
-    if (saved.theme) $("#overlayTheme").value = ["void", "glass"].includes(saved.theme) ? saved.theme : "void";
-    if (saved.rows) $("#overlayRows").value = saved.rows; if (saved.hitRows) $("#overlayHitRows").value = saved.hitRows; if (saved.scale) $("#overlayScale").value = saved.scale; if (saved.bg !== undefined) $("#overlayBg").value = saved.bg;
-    $$("#accentOptions button").forEach((button) => button.classList.toggle("active", button.dataset.accent === saved.accent));
-    if (Array.isArray(saved.show)) {
-      const restoredShow = new Set(saved.show);
-      if (number(saved.schemaVersion, 1) < OVERLAY_SETTINGS_VERSION && restoredShow.has("encounter")) {
-        restoredShow.add("phase"); restoredShow.add("boss"); restoredShow.add("graph"); restoredShow.add("survival");
-      }
-      if (number(saved.schemaVersion, 1) < 4) restoredShow.delete("telemetry");
-      $$(".show-options input").forEach((input) => { input.checked = !input.disabled && restoredShow.has(input.value); });
-    }
+    const appliedProfile = applyStudioControls(saved);
+    state.studioProfileDrafts[appliedProfile] = { ...saved, profile: appliedProfile, show: Array.isArray(saved.show) ? [...saved.show] : [] };
     if (migrateLocal || retryLocal) {
       state.studioBackendPending = true;
       const migrated = readStudioOptions();
       storeStudioOptions(migrated);
       queueOverlayProfileSave(migrated);
     }
+  }
+
+  function studioProfilePreset(profile, base = {}) {
+    const presets = {
+      broadcast: { layout: "landscape", accent: "cyan", rows: 8, hitRows: 5, show: ["dps", "damage", "graph", "incoming", "survival", "encounter", "phase", "boss", "hits", "focus"] },
+      minimal: { layout: "landscape", accent: "mint", rows: 4, hitRows: 3, show: ["dps", "incoming", "encounter", "phase", "boss", "focus"] },
+      vr: { layout: "landscape", accent: "violet", rows: 3, hitRows: 3, show: ["dps", "incoming", "phase", "boss", "hits", "focus"] },
+      target: { layout: "landscape", accent: "amber", rows: 1, hitRows: 1, show: ["focus"] }
+    };
+    return {
+      ...base,
+      ...(presets[profile] || presets.target),
+      profile,
+      theme: base.theme || "void",
+      scale: number(base.scale, 100),
+      bg: number(base.bg, 94),
+      schemaVersion: OVERLAY_SETTINGS_VERSION
+    };
   }
 
   async function setOutputEnabled(kind, enabled, button) {
@@ -1646,7 +1717,15 @@
   }
 
   function bindStudio() {
-    $$(".profile-card").forEach((button) => button.addEventListener("click", () => { $$(".profile-card").forEach((b) => b.classList.toggle("active", b === button)); renderStudioPreview(true); }));
+    $$(".profile-card").forEach((button) => button.addEventListener("click", () => {
+      const current = readStudioOptions();
+      state.studioProfileDrafts[current.profile] = { ...current, show: [...current.show] };
+      const profile = button.dataset.profile;
+      const fallback = studioProfilePreset(profile, current);
+      const saved = state.studioProfileDrafts[profile] || studioOptionsFromSettings(profile) || fallback;
+      applyStudioControls(saved);
+      renderStudioPreview(true);
+    }));
     $$("#overlayLayout,#overlayTheme,#overlayRows,#overlayHitRows,#overlayScale,#overlayBg,.show-options input").forEach((control) => control.addEventListener("input", () => renderStudioPreview(true)));
     $$("#accentOptions button").forEach((button) => button.addEventListener("click", () => { $$("#accentOptions button").forEach((b) => b.classList.toggle("active", b === button)); renderStudioPreview(true); }));
     $("#copyObsUrl")?.addEventListener("click", async () => { await copyText($("#obsUrl").value); showToast("URL copied. In OBS, press Ctrl+A in the URL field before pasting."); });
@@ -1737,14 +1816,14 @@
     const dialog = $("#settingsDialog"); if (!dialog) return;
     $("#logPath").value = state.settings.log_path ?? state.settings.logPath ?? state.settings.log_directory ?? "";
     $("#importDays").value = clamp(number(state.settings.import_days, 3), 1, 30);
-    setSwitch($("#autoImportToggle"), state.settings.auto_import_recent_logs ?? true); setSwitch($("#bossTargetAlertToggle"), state.settings.boss_target_alert_enabled ?? true); setSwitch($("#launchMinimizedToggle"), state.settings.launch_minimized ?? false); setSwitch($("#minimizeTrayToggle"), state.settings.minimize_to_tray ?? true); dialog.showModal(); refreshAudioOutputDevices();
+    setSwitch($("#autoImportToggle"), state.settings.auto_import_recent_logs ?? true); setSwitch($("#bossTargetAlertToggle"), state.settings.boss_target_alert_enabled ?? true); setSwitch($("#bossTargetHandoffAlertToggle"), state.settings.boss_target_handoff_alert_enabled ?? false); setSwitch($("#launchMinimizedToggle"), state.settings.launch_minimized ?? false); setSwitch($("#minimizeTrayToggle"), state.settings.minimize_to_tray ?? true); dialog.showModal(); refreshAudioOutputDevices();
   }
 
   function setSwitch(button, active) { if (!button) return; button.classList.toggle("active", active); button.setAttribute("aria-checked", String(active)); }
   function toggleSwitch(button) { setSwitch(button, button.getAttribute("aria-checked") !== "true"); }
 
   async function saveSettings() {
-    const patch = { log_path: $("#logPath").value.trim(), import_days: clamp(Math.round(number($("#importDays").value, 3)), 1, 30), auto_import_recent_logs: $("#autoImportToggle").getAttribute("aria-checked") === "true", boss_target_alert_enabled: $("#bossTargetAlertToggle").getAttribute("aria-checked") === "true", audio_output_device_id: $("#audioOutputDevice").value, launch_minimized: $("#launchMinimizedToggle").getAttribute("aria-checked") === "true", minimize_to_tray: $("#minimizeTrayToggle").getAttribute("aria-checked") === "true" };
+    const patch = { log_path: $("#logPath").value.trim(), import_days: clamp(Math.round(number($("#importDays").value, 3)), 1, 30), auto_import_recent_logs: $("#autoImportToggle").getAttribute("aria-checked") === "true", boss_target_alert_enabled: $("#bossTargetAlertToggle").getAttribute("aria-checked") === "true", boss_target_handoff_alert_enabled: $("#bossTargetHandoffAlertToggle").getAttribute("aria-checked") === "true", audio_output_device_id: $("#audioOutputDevice").value, launch_minimized: $("#launchMinimizedToggle").getAttribute("aria-checked") === "true", minimize_to_tray: $("#minimizeTrayToggle").getAttribute("aria-checked") === "true" };
     try { await api("/api/settings", { method: "PUT", body: JSON.stringify(patch) }); state.settings = { ...state.settings, ...patch }; $("#settingsDialog").close(); showToast("Settings saved."); }
     catch (_) { text("#settingsStatus", "Service unavailable — changes not applied."); }
   }
@@ -1765,7 +1844,7 @@
     $("#analysisPlayerSelect")?.addEventListener("change", (event) => { const run = selectedAnalysisRun(); if (run) { const context = selectedAnalysisContext(run); state.analysisPlayerByRun[`${run.id}:${context?.id ?? "all-bosses"}`] = event.target.value; } renderAnalysis(); });
     $("#eventRunSelect")?.addEventListener("change", loadEventsForRun); $("#eventSearch")?.addEventListener("input", renderEvents); $("#eventTypeFilter")?.addEventListener("change", renderEvents); $("#strikeOnly")?.addEventListener("change", renderEvents);
     $("#loadMoreEvents")?.addEventListener("click", () => { state.eventLimit += 80; renderEvents(); }); $("#copyEventsButton")?.addEventListener("click", async () => { await copyText(visibleEvents().map((event) => `${event.time}\t${event.type}\t${event.source}\t${event.action}\t${event.target}\t${event.amount}`).join("\n")); showToast("Visible events copied as tab-separated text."); });
-    $("#settingsButton")?.addEventListener("click", openSettings); ["#autoImportToggle", "#bossTargetAlertToggle", "#launchMinimizedToggle", "#minimizeTrayToggle"].forEach((selector) => $(selector)?.addEventListener("click", (event) => toggleSwitch(event.currentTarget))); $("#audioOutputDevice")?.addEventListener("change", (event) => renderAudioOutputDevices(state.audioDevices, event.currentTarget.value)); $("#saveSettings")?.addEventListener("click", saveSettings);
+    $("#settingsButton")?.addEventListener("click", openSettings); ["#autoImportToggle", "#bossTargetAlertToggle", "#bossTargetHandoffAlertToggle", "#launchMinimizedToggle", "#minimizeTrayToggle"].forEach((selector) => $(selector)?.addEventListener("click", (event) => toggleSwitch(event.currentTarget))); $("#audioOutputDevice")?.addEventListener("change", (event) => renderAudioOutputDevices(state.audioDevices, event.currentTarget.value)); $("#saveSettings")?.addEventListener("click", saveSettings);
     $("#detectLogButton")?.addEventListener("click", () => { $("#logPath").value = "%USERPROFILE%\\AppData\\LocalLow\\VRChat\\VRChat"; text("#settingsStatus", "Default VRChat location selected."); });
     window.addEventListener("resize", debounce(() => { drawLiveChart(); drawCompareChart(); }, 120));
     document.addEventListener("visibilitychange", () => { if (!document.hidden) renderAll(); });
@@ -1783,7 +1862,7 @@
       if (!state.live || state.frozen) return;
       state.live.encounter.duration += 1;
       const drift = Math.sin(state.live.encounter.duration * .17) * .006;
-      state.live.outgoing.dps *= 1 + drift; state.live.partyHps *= 1 - drift * .7; state.live.incoming.dps *= 1 + Math.sin(state.live.encounter.duration * .11) * .004;
+      state.live.outgoing.dps *= 1 + drift; state.live.incoming.dps *= 1 + Math.sin(state.live.encounter.duration * .11) * .004;
       onTick();
     }, 1000));
   }

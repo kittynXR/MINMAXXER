@@ -101,6 +101,41 @@ impl Default for OverlayProfile {
     }
 }
 
+impl OverlayProfile {
+    pub fn target_only() -> Self {
+        Self {
+            id: "target".to_owned(),
+            name: "Target-only HUD".to_owned(),
+            layout: "landscape".to_owned(),
+            theme: "void".to_owned(),
+            accent: "amber".to_owned(),
+            background: "rgba(5, 7, 11, 0.94)".to_owned(),
+            rows: 1,
+            scale: 1.0,
+            show_dps: false,
+            show_damage: false,
+            show_healing: false,
+            show_incoming: false,
+            show_hits: false,
+            show_recent_hits: false,
+            recent_hit_rows: 1,
+            show_encounter: false,
+            show_phase: false,
+            show_boss_number: false,
+            show_focus: true,
+            show_graph: false,
+            show_survival: false,
+            show_telemetry: false,
+            show_loadout: false,
+            anonymize_players: false,
+        }
+    }
+}
+
+fn default_overlay_profiles() -> Vec<OverlayProfile> {
+    vec![OverlayProfile::default(), OverlayProfile::target_only()]
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppConfig {
@@ -110,6 +145,7 @@ pub struct AppConfig {
     pub auto_import_recent_logs: bool,
     pub import_days: u32,
     pub boss_target_alert_enabled: bool,
+    pub boss_target_handoff_alert_enabled: bool,
     pub audio_output_device_id: String,
     pub launch_minimized: bool,
     pub minimize_to_tray: bool,
@@ -128,13 +164,20 @@ impl Default for AppConfig {
             auto_import_recent_logs: true,
             import_days: 3,
             boss_target_alert_enabled: true,
+            boss_target_handoff_alert_enabled: false,
             audio_output_device_id: String::new(),
             launch_minimized: false,
             minimize_to_tray: true,
             stream_token: generate_install_token(),
-            desktop_overlay: DesktopOverlaySettings::default(),
-            vr_overlay: VrOverlaySettings::default(),
-            overlay_profiles: vec![OverlayProfile::default()],
+            desktop_overlay: DesktopOverlaySettings {
+                profile: "target".to_owned(),
+                ..DesktopOverlaySettings::default()
+            },
+            vr_overlay: VrOverlaySettings {
+                target_only: true,
+                ..VrOverlaySettings::default()
+            },
+            overlay_profiles: default_overlay_profiles(),
         }
     }
 }
@@ -158,7 +201,7 @@ impl AppConfig {
             migrated = true;
         }
         if config.overlay_profiles.is_empty() {
-            config.overlay_profiles.push(OverlayProfile::default());
+            config.overlay_profiles = default_overlay_profiles();
             migrated = true;
         }
         migrated |= config.migrate_overlay_schema(&raw);
@@ -351,6 +394,46 @@ mod tests {
     use super::*;
 
     #[test]
+    fn fresh_installs_default_to_target_only_without_changing_legacy_field_defaults() {
+        let config = AppConfig::default();
+        let target = config
+            .overlay_profiles
+            .iter()
+            .find(|profile| profile.id == "target")
+            .expect("fresh configs should include the target-only profile");
+
+        assert_eq!(config.desktop_overlay.profile, "target");
+        assert!(config.vr_overlay.target_only);
+        assert_eq!(target.rows, 1);
+        assert_eq!(target.recent_hit_rows, 1);
+        assert!(target.show_focus);
+        assert!(!target.show_dps);
+        assert!(!target.show_damage);
+        assert!(!target.show_incoming);
+        assert!(!target.show_hits);
+        assert!(!target.show_graph);
+        assert!(!target.show_survival);
+
+        assert_eq!(DesktopOverlaySettings::default().profile, "broadcast");
+        assert!(!VrOverlaySettings::default().target_only);
+    }
+
+    #[test]
+    fn existing_broadcast_selection_deserializes_without_becoming_target_only() {
+        let mut raw = serde_json::to_value(AppConfig::default()).unwrap();
+        raw["desktop_overlay"]["profile"] = serde_json::json!("broadcast");
+        raw["vr_overlay"]["target_only"] = serde_json::json!(false);
+        raw["overlay_profiles"] = serde_json::json!([OverlayProfile::default()]);
+
+        let config: AppConfig = serde_json::from_value(raw).unwrap();
+
+        assert_eq!(config.desktop_overlay.profile, "broadcast");
+        assert!(!config.vr_overlay.target_only);
+        assert_eq!(config.overlay_profiles.len(), 1);
+        assert_eq!(config.overlay_profiles[0].id, "broadcast");
+    }
+
+    #[test]
     fn legacy_configs_enable_the_boss_target_alert_by_default() {
         let mut raw = serde_json::to_value(AppConfig::default()).unwrap();
         raw.as_object_mut()
@@ -388,6 +471,53 @@ mod tests {
         config.save(&path).unwrap();
 
         assert!(!AppConfig::load(&path).unwrap().boss_target_alert_enabled);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn legacy_configs_disable_the_optional_handoff_alert_by_default() {
+        let mut raw = serde_json::to_value(AppConfig::default()).unwrap();
+        raw.as_object_mut()
+            .unwrap()
+            .remove("boss_target_handoff_alert_enabled");
+
+        let config: AppConfig = serde_json::from_value(raw).unwrap();
+
+        assert!(!config.boss_target_handoff_alert_enabled);
+        assert!(serde_json::to_value(config)
+            .unwrap()
+            .get("boss_target_handoff_alert_enabled")
+            .is_some_and(serde_json::Value::is_boolean));
+    }
+
+    #[test]
+    fn boss_target_handoff_alert_setting_round_trips_on_disk() {
+        let path = std::env::temp_dir().join(format!(
+            "minmaxxer-handoff-alert-config-{}-{}.json",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut config = AppConfig {
+            boss_target_handoff_alert_enabled: true,
+            ..AppConfig::default()
+        };
+        config.save(&path).unwrap();
+
+        assert!(
+            AppConfig::load(&path)
+                .unwrap()
+                .boss_target_handoff_alert_enabled
+        );
+        config.boss_target_handoff_alert_enabled = false;
+        config.save(&path).unwrap();
+        assert!(
+            !AppConfig::load(&path)
+                .unwrap()
+                .boss_target_handoff_alert_enabled
+        );
         fs::remove_file(path).unwrap();
     }
 
@@ -436,7 +566,7 @@ mod tests {
     }
 
     #[test]
-    fn outgoing_healing_column_is_opt_in_and_round_trips() {
+    fn reserved_outgoing_healing_preference_round_trips_for_compatibility() {
         let mut profile = OverlayProfile::default();
         assert!(!profile.show_healing);
 
